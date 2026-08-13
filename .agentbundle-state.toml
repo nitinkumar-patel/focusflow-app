@@ -1,0 +1,108 @@
+schema-version = "0.4"
+
+[pack.core.adapters.claude-code]
+installed-version = "2.5.9"
+source = "git+https://github.com/eugenelim/agent-ready-repo"
+install-route = "cli"
+scope = "repo"
+user-root = "~/.agentbundle"
+primitives = ["skill", "agent", "hook-body", "hook-wiring", "command"]
+
+[pack.core.adapters.claude-code.files]
+".claude/agents/adversarial-reviewer.md" = { from-pack-version = "2.5.9", sha = "d39d47dfcd80900c990d29a852593442a7178ba5b6d09fecb68818b0024577ad" }
+".claude/agents/implementer.md" = { from-pack-version = "2.5.9", sha = "6349e84b2110548cdecb8407f4256ab8ef3e40b300d857586145e531efffe021" }
+".claude/agents/quality-engineer.md" = { from-pack-version = "2.5.9", sha = "591572cdbbffb59b79805bc8a95ffc11cee87bc1223b0475849942de0389b6a3" }
+".claude/agents/security-reviewer.md" = { from-pack-version = "2.5.9", sha = "ef496ef9b326d27a2e2a02a24b983afe567b74aa85e53041d72ae3a286e9bf37" }
+".claude/commands/conventions-check.md" = { from-pack-version = "2.5.9", sha = "3ceeef1a68f0a75faa8fad7d08a35f0f3262ce3df463ecac362594f578060946" }
+".claude/settings.local.json" = { from-pack-version = "2.5.9", sha = "cfab918da4a9593dfd4fe015d707407bf17fba1aaeae5fa40a71433ba624b1ec" }
+".claude/skills/adapt-to-project/SKILL.md" = { from-pack-version = "2.5.9", sha = "c163adbfd2289667fabc92372302521bb3e10c73b378290a8ed8b957a0b92261" }
+".claude/skills/adapt-to-project/assets/reference.md" = { from-pack-version = "2.5.9", sha = "67f27091a6d77419ad43df2e5445e2c7d6f96209f29ba2c1c58c2280487f3519" }
+".claude/skills/adapt-to-project/evals/eval_queries.json" = { from-pack-version = "2.5.9", sha = "13508915ff860864194fc486e58bffb20ca22405ef506b34ea917fecc0a619c3" }
+".claude/skills/author-brief/SKILL.md" = { from-pack-version = "2.5.9", sha = "c88a8447fc6411d8cfb4131c6146df99eac6048727c8750aa65a8cc16135b3ad" }
+".claude/skills/bug-fix/SKILL.md" = { from-pack-version = "2.5.9", sha = "ce827ab9f105f22787d5182dd938b967de0836f21062f2cea2c6fa6fda834712" }
+".claude/skills/bug-fix/evals/eval_queries.json" = { from-pack-version = "2.5.9", sha = "31b0794933fa66be71242c517a6dfe1e0be844e3c2ed39cae9e5ce7a9d173705" }
+".claude/skills/bug-fix/evals/evals.json" = { from-pack-version = "2.5.9", sha = "865286516022fd8ec9180f0a43b9b19a7509996a7fcfea04030da3f72aceff9c" }
+".claude/skills/capture-work/SKILL.md" = { from-pack-version = "2.5.9", sha = "e0b74f5bcdefdc45e43684a2791fc0ec3731d858f7781560fd379143a661829f" }
+".claude/skills/contract-acquisition/SKILL.md" = { from-pack-version = "2.5.9", sha = "fa1ff4527f2998789f3dcc99d8d0869bb2758144e5a2cb682a9c767a78d8c72d" }
+".claude/skills/contract-acquisition/references/oracle-table.md" = { from-pack-version = "2.5.9", sha = "ee7ba570fa42a43322d498a4f5bc61b403628aa0d8e4bcb7744ca25311cd9134" }
+".claude/skills/init-project/SKILL.md" = { from-pack-version = "2.5.9", sha = "e3394ef15cb828bb760395dbe46177fcdc77a6999b00bb5eaaa76a3266b73225" }
+".claude/skills/init-project/evals/eval_queries.json" = { from-pack-version = "2.5.9", sha = "31c6860d8fd04be8d7155faece1e0a3810b9fca8b7995738009772e889531516" }
+".claude/skills/new-spec/SKILL.md" = { from-pack-version = "2.5.9", sha = "7d00076e6af12cc6b39d956d4b5277bc93655c5216c1a04a367ba774d0e79725" }
+".claude/skills/new-spec/assets/plan.md" = { from-pack-version = "2.5.9", sha = "8ac22a1f763a33c3db81a612458d2a350945afd225bee4f819c6d073e6ac4f77" }
+".claude/skills/new-spec/assets/spec.md" = { from-pack-version = "2.5.9", sha = "634e29c44443e80e304569a97333b0ed05113723dbc0a6bff748d5ebb66c6f0e" }
+".claude/skills/new-spec/evals/eval_queries.json" = { from-pack-version = "2.5.9", sha = "232110b65f38b175c184624eb65450a4f964f49d873f4910d164c0136e445c6e" }
+".claude/skills/new-spec/references/contract-types.md" = { from-pack-version = "2.5.9", sha = "b507d39401f4d87c7a6134d90b03c6c30b47aac7ccc8353723e7466c51011b44" }
+".claude/skills/operational-safety/SKILL.md" = { from-pack-version = "2.5.9", sha = "4ed5ebc1bb368dee5ae1a52ce3606a1c621cb6661ad3743541ca92cf310c1732" }
+".claude/skills/operational-safety/references/blast-radius.md" = { from-pack-version = "2.5.9", sha = "5d6f18ac186fb2fa7bc4c21ee28a2a6f7fe27a2a479895044fb49fffd3365355" }
+".claude/skills/operational-safety/references/cloud-implementation-craft.md" = { from-pack-version = "2.5.9", sha = "92bfd6b806729b5ac3e40108f048549604adb50122dc970db37762af026be234" }
+".claude/skills/operational-safety/references/cost-and-teardown.md" = { from-pack-version = "2.5.9", sha = "91745e0e9ca3e0cb1d5277b28bd9607c6251f6b2c77b537f2506e0366839c314" }
+".claude/skills/operational-safety/references/drift-and-rollback.md" = { from-pack-version = "2.5.9", sha = "b232a1d1f7d7f75ad86721ce80ce16179483e8e984ca5508960f704fc1f3bfbf" }
+".claude/skills/operational-safety/references/environment-isolation.md" = { from-pack-version = "2.5.9", sha = "ccdd9ac57ec253b6dc5e6aab362176084474a59fe1059394b8d86b5d2d392cdf" }
+".claude/skills/operational-safety/references/fidelity-ladder.md" = { from-pack-version = "2.5.9", sha = "379f3f088de941f477aab9ffb025366d487ac7d8d808befee8cea9a6f70eac1c" }
+".claude/skills/operational-safety/references/observability-and-smoke.md" = { from-pack-version = "2.5.9", sha = "98c11869167eac0e03d4f7749a966fce224170b600e2f42c8489dc0cd48496dd" }
+".claude/skills/operational-safety/references/state-and-idempotency.md" = { from-pack-version = "2.5.9", sha = "8c7e2cb176799b04cabb8f9ebaee3cd5233e14808ffd51054ef5c3e1e462e656" }
+".claude/skills/receive-brief/SKILL.md" = { from-pack-version = "2.5.9", sha = "13063837af965ed486072641bfd5695d4cb0d4e1963ee5e2b928be694eae213b" }
+".claude/skills/receive-brief/evals/eval_queries.json" = { from-pack-version = "2.5.9", sha = "6bfea13d00c5e6853f4066b1271ffbe17d298d96cea1b1a054da2eceb5e3c496" }
+".claude/skills/receive-brief/examples/shape-a-outcome-brief.md" = { from-pack-version = "2.5.9", sha = "e37651a71697dc6a2b6cc3468d9f04245dc6ba6d8c2028c461f25ac2b1c31857" }
+".claude/skills/receive-brief/examples/shape-b-story-list-brief.md" = { from-pack-version = "2.5.9", sha = "4479b51b884cdb04eaef404f71527a1b0a0e51210a599b078051ceda8ff8d1f4" }
+".claude/skills/receive-brief/scripts/lint-brief-coverage.py" = { from-pack-version = "2.5.9", sha = "c847b10ea07fe9f70e44bc7daa20a08e96c6fd88f74515266de2ac7129b0b79f" }
+".claude/skills/security-checklists/SKILL.md" = { from-pack-version = "2.5.9", sha = "7721f345f2fe4824ac5676e0a77b73a46e7deaa7a6df02b55e823bfa6d21909e" }
+".claude/skills/security-checklists/references/access-control.md" = { from-pack-version = "2.5.9", sha = "2830dc07695728fa99c361194d1e42df97bc1096310ba27350281c2e5300a0b4" }
+".claude/skills/security-checklists/references/agentic-skills.md" = { from-pack-version = "2.5.9", sha = "81896128a7570d3204cf9bbede798d2d534ff229a7e96a4d218677d8d00720f6" }
+".claude/skills/security-checklists/references/authn-session.md" = { from-pack-version = "2.5.9", sha = "27bcf6da9f9566f136ab7d01fccc749a5beac10fc398764f016070e4397c6d16" }
+".claude/skills/security-checklists/references/config-misconfig.md" = { from-pack-version = "2.5.9", sha = "8017d17089b2295a385060d364dfefb8772f277734e1341e035bd3531a0f7965" }
+".claude/skills/security-checklists/references/exceptional-conditions.md" = { from-pack-version = "2.5.9", sha = "94d81ae80ebbfa6c7d98b0fe5f2b9d9d227e6b07b3ef6a0f7f4b231618e7924b" }
+".claude/skills/security-checklists/references/injection.md" = { from-pack-version = "2.5.9", sha = "b1cc50272fe8d0becc8dee3f09d939d5d9fd33e01a6362485548d137407a3aca" }
+".claude/skills/security-checklists/references/llm-agent.md" = { from-pack-version = "2.5.9", sha = "506e9a43ce03baddaf2279146b672d3c2a4c7f7a5132aec58bec6814d10218fe" }
+".claude/skills/security-checklists/references/outbound-ssrf.md" = { from-pack-version = "2.5.9", sha = "b72221fca022c85862c0ec69bb3920d6961bc5261abb62107e015d095e111a3f" }
+".claude/skills/security-checklists/references/path-and-file.md" = { from-pack-version = "2.5.9", sha = "8699a3c52e0e32b9b0e3828f35db611358343756e7dad0a3ecc0cae513f3a852" }
+".claude/skills/security-checklists/references/secrets-and-crypto.md" = { from-pack-version = "2.5.9", sha = "83a56a26d9cc6311c7a815c39415e62748267276583bdae886f4bfdcc7e4bb6f" }
+".claude/skills/security-checklists/references/supply-chain.md" = { from-pack-version = "2.5.9", sha = "ab507316f68ad0049b6a30a1b76996172704114fbf5cefdd38aac5e8cfb99a69" }
+".claude/skills/work-loop/SKILL.md" = { from-pack-version = "2.5.9", sha = "2093ebbee17e92b25e3946e21073fba1e14ac6e19d0ad60887734e4a8078b694" }
+".claude/skills/work-loop/assets/state.json" = { from-pack-version = "2.5.9", sha = "21d936d09d5410bf6828a4ac21200088e78c6aaad43719454b4235e54b3ac9a5" }
+".claude/skills/work-loop/evals/evals.json" = { from-pack-version = "2.5.9", sha = "cf3dd73c68fa64a5014f583eff7a26a4389a7f9fb6044a1b2b440dd96cd69f9d" }
+".claude/skills/work-loop/references/infra-verification.md" = { from-pack-version = "2.5.9", sha = "6940dd17c7ce52b237a6289467de171d02bfdddf6fba6e555042d71945aaeca4" }
+".claude/skills/work-loop/references/pre-execute-review.md" = { from-pack-version = "2.5.9", sha = "9414c9e463e8f863e3938938908dbe9da5c7a65b94e87b41331d1806b7ca54b3" }
+".claude/skills/work-loop/references/pre-flight-failures.md" = { from-pack-version = "2.5.9", sha = "9b48fbd3d6046e4661b1ef923260a62b4e1402e07964753244800137862a4f47" }
+".claude/skills/work-loop/references/scale-with-a-tool.md" = { from-pack-version = "2.5.9", sha = "b5785d8711c5fcb64b92779abc7f4331b7a5673bd7e9c18e129e4346402fcc7d" }
+".claude/skills/work-loop/references/self-coverage/protocol.md" = { from-pack-version = "2.5.9", sha = "1f55c3d6bc979174091be0e55baf6b9cf48c5245f78947de3d0e5cbfb446c6dd" }
+".claude/skills/work-loop/references/self-coverage/resolve-vs-surface.md" = { from-pack-version = "2.5.9", sha = "2c10aa6b84fcc6db3973603904acb57a92fc7e361a19bcfbd0e5e4e398871def" }
+".claude/skills/work-loop/references/state-schema.md" = { from-pack-version = "2.5.9", sha = "224257028db9b8043483a9856ac3de5358182e9ff852864ad222b746764833a7" }
+".claude/skills/work-loop/references/supervisor-mode.md" = { from-pack-version = "2.5.9", sha = "293ed59b1b56305e09776199ae1b4bd881eac03b321e2501fca49d9cfd18006b" }
+".claude/skills/work-loop/references/tdd-stubs.md" = { from-pack-version = "2.5.9", sha = "f7dcf9b91417114d7904f8e26a30f8a95117d12018fd8c35fac93fea9a12564a" }
+".claude/skills/work-loop/references/verification-modes.md" = { from-pack-version = "2.5.9", sha = "57bc053552b98cdf0cba6fed8eeadf7014b90a5d46171a581b299872c7612e14" }
+".claude/skills/work-loop/scripts/_statelock.py" = { from-pack-version = "2.5.9", sha = "8a43d3a7ffac7c5accb3a96206bb35d56e42248fc483a4815e929bec5c98ae9a" }
+".claude/skills/work-loop/scripts/append-knowledge.py" = { from-pack-version = "2.5.9", sha = "eeca7e65bb5dac761f17d3bb1cef83a1aad19f1e3e30a9c07539bd2286629f20" }
+".claude/skills/work-loop/scripts/check-base-freshness.py" = { from-pack-version = "2.5.9", sha = "179a8f3d0afc22f78bc98c023a8c4933a82c218097010fc7061fc4aa89fb6358" }
+".claude/skills/work-loop/scripts/check-spec-status.py" = { from-pack-version = "2.5.9", sha = "1f7b21a825eed327c51deccce4635fe66017c220c34368b1cfd5a9402698b071" }
+".claude/skills/work-loop/scripts/lint-knowledge.py" = { from-pack-version = "2.5.9", sha = "5fc05079607ca13c66bde1c0c12589cf766e41c5fd6e17fbdf2a5d0f38b4392e" }
+".claude/skills/work-loop/scripts/lint-spec-status.py" = { from-pack-version = "2.5.9", sha = "6a9ba8e4ff0e8754285c89038aa50d38393c493ae3f7c1be77bcf47e5e97a395" }
+".claude/skills/work-loop/scripts/lint-traceability.py" = { from-pack-version = "2.5.9", sha = "e157dab8bb92f7caef152851934a827a815444a408c2371b88a523902d5de5f7" }
+".claude/skills/work-loop/scripts/loop-cohort.py" = { from-pack-version = "2.5.9", sha = "3de09e70c88fb9c35c20acf79779c9aa950cbdc0dba90fedf0d6dd08a33bf194" }
+".claude/skills/work-loop/scripts/loop-engine.py" = { from-pack-version = "2.5.9", sha = "61e2d24983ce30f8f32b0a75f7f8422b217a2f649244bff04b3099c29d6ddcb3" }
+".claude/skills/workspace-status/SKILL.md" = { from-pack-version = "2.5.9", sha = "cb3b1e4a47ee5c5bf4607cc0897f0f12a1624d73eacf41795dd9d5824a83c972" }
+".claude/skills/workspace-status/evals/eval_queries.json" = { from-pack-version = "2.5.9", sha = "de8ab8a4fac5a76c7061d917dc1e446bfff42c80909831922bce06a5326469aa" }
+".claude/skills/workspace-status/evals/evals.json" = { from-pack-version = "2.5.9", sha = "f64e100dae4623dffb6c79d304ee0c44ccd3c26fe583caba4c77d6cd9d8ed885" }
+".claude/skills/workspace-status/evals/files/empty/workspace.toml" = { from-pack-version = "2.5.9", sha = "871de80107981ebe889f6815113d28e12b8c637f5d1cf3c7ab4124cb2165ecca" }
+".claude/skills/workspace-status/evals/files/target/workspace.toml" = { from-pack-version = "2.5.9", sha = "462de313e159ec236a5cc26e8f9e3a513072261ad08477d8cfb83c22b11a63fd" }
+".claude/skills/workspace-status/evals/files/workspace.toml" = { from-pack-version = "2.5.9", sha = "fa77c7f801cbc1d1c433608dd4f89911c4636341fa9bb53697f61eaeb3425f4c" }
+".claude/skills/workspace-status/references/agentbundle-layout.md" = { from-pack-version = "2.5.9", sha = "cbb87090bf4e78f626b2e47d0bbd08fcc073b6c89a8409223cdf53ff819c04a5" }
+".claude/skills/workspace-status/scripts/workspace_mcp_server.py" = { from-pack-version = "2.5.9", sha = "c2b252f55c99d54558b253e3c14aa40a5feec5bbcaad1340154e57e3d2c03199" }
+".claude/skills/workspace-status/scripts/workspace_status.py" = { from-pack-version = "2.5.9", sha = "b22ca21879d21b6039ca3de3bbdf76467f05da4383d7695b154d9875e942dc8a" }
+".claude/skills/workspace-status/scripts/workspace_status_engine.py" = { from-pack-version = "2.5.9", sha = "60281f7f017ac39716ff82d0ff82cbc06e925395743d2fd77ce3615c5d52f106" }
+".gitignore" = { from-pack-version = "2.5.9", sha = "c989dfad6ca0de54478b0d2969bfa9999e2400751209ca9d0ddbfb796e650d10" }
+"AGENTS.md" = { from-pack-version = "2.5.9", sha = "632b76df7a1d68b07fcba8ded0645cee5a97709e7af4b80bb3ca3adab79ed590" }
+"docs/CHARTER.md" = { from-pack-version = "2.5.9", sha = "13849d4359067e4f7fda0c492f5ce1550741ea97140a858f2b90194341e43b3a" }
+"docs/CONVENTIONS.md" = { from-pack-version = "2.5.9", sha = "a8f5b5d448a44a3634141a23835f25968f100890cc450654e6b36e51faeb463f" }
+"docs/architecture/README.md" = { from-pack-version = "2.5.9", sha = "a7e28e5163e851cd5f464e7eccc9038c7a97b574eb3bb1822de542be0ea111c6" }
+"docs/architecture/overview.md" = { from-pack-version = "2.5.9", sha = "2f1b4c5b74ee1c6a4899a092945ae367c8985b83234fad7b98de49019df7c04f" }
+"docs/knowledge/README.md" = { from-pack-version = "2.5.9", sha = "e7e99de97d740440f58f26196c6fa40f064d285887b64ca5ba3781880a745bae" }
+"docs/knowledge/patterns.jsonl" = { from-pack-version = "2.5.9", sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" }
+"docs/product/README.md" = { from-pack-version = "2.5.9", sha = "c7a814fe47074b7cec0b503331e1722ff8710bcf3d2b88a683357d6aab5adebd" }
+"docs/product/changelog.md" = { from-pack-version = "2.5.9", sha = "96e3fda42bf482416399fbe698f071b3d56266bd001a5f36aafd02a617252faa" }
+"docs/product/roadmap.md" = { from-pack-version = "2.5.9", sha = "e0c732819d7dfebeb5f8876e1a3f40c26d5f914546782a5209a21963402cfbe7" }
+"docs/specs/README.md" = { from-pack-version = "2.5.9", sha = "4c2e8dfa29257017ce99d98853dbbf0c6067288d90d66ea26afed42d7e169b19" }
+"tools/hooks/pre-pr.py" = { from-pack-version = "2.5.9", sha = "71ddbdc9c9ffc10d4d914dba9fd281e47b8a7e187894a2204b436b72a987d089" }
+"tools/hooks/session-start.py" = { from-pack-version = "2.5.9", sha = "d26c62eff7f9f98ec41ddf37aa6344e9b6b98e021feb41399f60198c4e31b41c" }
+"tools/hooks/work-loop-check.py" = { from-pack-version = "2.5.9", sha = "aaa859d192039576e0d59110af25ecea1bf0266e1fc03fb1002d71c239161919" }
+"workspace.toml" = { from-pack-version = "2.5.9", sha = "86e9327a283e3bfcbc9553377bc0df78add418711980533bc081cc05577d5754" }
