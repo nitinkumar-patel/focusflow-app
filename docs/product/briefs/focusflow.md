@@ -61,4 +61,4 @@ Populated by receive-brief during decomposition. -->
 
 | Spec | Status |
 | --- | --- |
-| _(to be decomposed by `receive-brief`)_ | — |
+| `walking-skeleton` | <auto> |

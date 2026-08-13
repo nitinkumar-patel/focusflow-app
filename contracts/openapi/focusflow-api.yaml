@@ -1,0 +1,314 @@
+# Authored without an authoring skill — no `api-contract` skill is installed
+# in this repo's `.claude/skills/` roster, so this file was hand-written and
+# carries no automated compatibility-rule enforcement (see new-spec skill,
+# step 4b / references/contract-types.md). Treat edits to this file with the
+# same care as hand-written code: nothing checks a breaking change for you.
+#
+# This is FocusFlow's internal API: only apps/web (the Next.js
+# backend-for-frontend) calls it, over the Docker Compose internal network.
+# It is never reachable from the browser (see ADR-0001 § Network topology).
+openapi: "3.1.0"
+x-spec: [docs/specs/walking-skeleton/]
+info:
+  title: FocusFlow internal API
+  version: "0.1.0"
+  description: >
+    Internal REST API served by apps/api (FastAPI). Every request except
+    /healthz requires InternalSecretHeader; every request except
+    /healthz, /auth/register, and /auth/verify additionally requires
+    UserIdHeader — apps/web attaches both after validating the caller's
+    NextAuth session; apps/api never accepts a request without the ones
+    it requires. /healthz requires neither — it is the unauthenticated
+    liveness/readiness check apps/web's own /healthz Route Handler calls.
+servers:
+  - url: http://api:8000
+    description: Docker Compose internal network address (service name "api").
+
+components:
+  parameters:
+    InternalSecretHeader:
+      name: X-Internal-Secret
+      in: header
+      required: true
+      description: >
+        Shared secret proving the caller is apps/web, not the browser.
+        Constant-time-compared against INTERNAL_API_SECRET.
+      schema:
+        type: string
+    UserIdHeader:
+      name: X-User-Id
+      in: header
+      required: true
+      description: >
+        The authenticated user's id, forwarded by apps/web from the
+        validated NextAuth session. Not present on /auth/register or
+        /auth/verify, which establish identity rather than assuming it.
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    User:
+      type: object
+      required: [id, email]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+
+    Task:
+      type: object
+      required: [id, title, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string, minLength: 1, maxLength: 200 }
+        created_at: { type: string, format: date-time }
+
+    PomodoroSession:
+      type: object
+      description: >
+        A single completed *work* interval run against a task. Break
+        intervals are client-side timer state only and are never persisted
+        — they are not focus time. The server rejects a session whose
+        duration_seconds doesn't match ended_at - started_at (±2s
+        tolerance) or that exceeds the configured work-interval length
+        (see plan.md § Behavior & rules).
+      required: [id, task_id, started_at, ended_at, duration_seconds]
+      properties:
+        id: { type: string, format: uuid }
+        task_id: { type: string, format: uuid }
+        started_at: { type: string, format: date-time }
+        ended_at: { type: string, format: date-time }
+        duration_seconds:
+          type: integer
+          minimum: 1
+          description: Wall-clock length of the completed work interval.
+
+    FocusTimeByDay:
+      type: object
+      required: [date, minutes]
+      properties:
+        date: { type: string, format: date }
+        minutes:
+          type: number
+          description: Rounded to one decimal place.
+
+    FocusTimeByTask:
+      type: object
+      required: [task_id, task_title, minutes]
+      properties:
+        task_id: { type: string, format: uuid }
+        task_title: { type: string }
+        minutes:
+          type: number
+          description: Rounded to one decimal place.
+
+    Error:
+      type: object
+      required: [detail]
+      properties:
+        detail: { type: string }
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid X-Internal-Secret, or unknown user.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ValidationError:
+      description: >
+        Request body failed schema validation (e.g. password under 8
+        chars, empty/too-long task title, duration_seconds inconsistent
+        with started_at/ended_at or exceeding the max work-interval
+        length). apps/web's Server Actions re-validate before calling
+        this API, so this response is reachable only via a non-standard
+        client or a bypassed form.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+paths:
+  /healthz:
+    get:
+      summary: Liveness/readiness check — also confirms DB connectivity.
+      description: >
+        Unauthenticated (no InternalSecretHeader). Runs SELECT 1 against
+        Postgres before returning. Called internally by apps/web's own
+        /healthz Route Handler, which Nginx proxies to for the
+        docker-compose smoke check (see plan.md T1 Design decisions).
+      responses:
+        "200":
+          description: API and database are both reachable.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [ok] }
+        "503":
+          description: Database unreachable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /auth/register:
+    post:
+      summary: Create a user account (email + password).
+      parameters:
+        - $ref: "#/components/parameters/InternalSecretHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+      responses:
+        "201":
+          description: Account created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "409":
+          description: Email already registered.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /auth/verify:
+    post:
+      summary: >
+        Verify email + password. Called from NextAuth's Credentials
+        `authorize()` — never reachable from the browser.
+      parameters:
+        - $ref: "#/components/parameters/InternalSecretHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        "200":
+          description: Credentials valid.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /tasks:
+    get:
+      summary: List the caller's tasks.
+      parameters:
+        - $ref: "#/components/parameters/InternalSecretHeader"
+        - $ref: "#/components/parameters/UserIdHeader"
+      responses:
+        "200":
+          description: Tasks belonging to the user, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Task" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      summary: Create a task.
+      parameters:
+        - $ref: "#/components/parameters/InternalSecretHeader"
+        - $ref: "#/components/parameters/UserIdHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string, minLength: 1, maxLength: 200 }
+      responses:
+        "201":
+          description: Task created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Task" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /tasks/{task_id}/sessions:
+    post:
+      summary: Record one completed Pomodoro work interval against a task.
+      parameters:
+        - $ref: "#/components/parameters/InternalSecretHeader"
+        - $ref: "#/components/parameters/UserIdHeader"
+        - name: task_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [started_at, ended_at, duration_seconds]
+              properties:
+                started_at: { type: string, format: date-time }
+                ended_at: { type: string, format: date-time }
+                duration_seconds: { type: integer, minimum: 1 }
+      responses:
+        "201":
+          description: Session recorded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PomodoroSession" }
+        "404":
+          description: Task does not exist or does not belong to this user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /analytics/focus-time:
+    get:
+      summary: Aggregate focus time (sum of recorded work-interval sessions).
+      parameters:
+        - $ref: "#/components/parameters/InternalSecretHeader"
+        - $ref: "#/components/parameters/UserIdHeader"
+        - name: days
+          in: query
+          required: false
+          description: Number of trailing days to include in by_day. Default 7.
+          schema: { type: integer, minimum: 1, maximum: 90, default: 7 }
+      responses:
+        "200":
+          description: >
+            Focus-time aggregates for the caller. by_day always contains
+            exactly `days` entries — one per trailing UTC calendar day
+            (including today), zero-filled for days with no sessions. Day
+            boundaries are computed in UTC from each session's started_at;
+            this is a simplification for the walking skeleton, not a
+            viewer-local-timezone bucketing.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [by_day, by_task]
+                properties:
+                  by_day:
+                    type: array
+                    items: { $ref: "#/components/schemas/FocusTimeByDay" }
+                  by_task:
+                    type: array
+                    items: { $ref: "#/components/schemas/FocusTimeByTask" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }

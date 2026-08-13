@@ -19,7 +19,7 @@ docs/specs/<feature>/
 
 | Spec | Status | Constrained by | Notes |
 | --- | --- | --- | --- |
-<!-- no specs yet -->
+| [`walking-skeleton`](walking-skeleton/spec.md) | Draft | ADR-0001 | First feature: signup/login, task + Pomodoro cycle, analytics, full stack end to end. |
 
 ## Shipped specs (archived)
 
