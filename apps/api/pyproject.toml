@@ -40,4 +40,10 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Module-level async engines (tests/conftest.py's test_engine) hold a
+# connection pool bound to whichever event loop first used it; a
+# function-scoped loop (pytest-asyncio's default) closes that loop after
+# every test and the pool then fails on the next test with "Event loop
+# is closed". Session-scoping the loop matches the engine's lifetime.
+asyncio_default_fixture_loop_scope = "session"
 testpaths = ["tests"]
