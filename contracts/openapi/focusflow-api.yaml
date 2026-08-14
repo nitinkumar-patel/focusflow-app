@@ -121,7 +121,12 @@ components:
         with started_at/ended_at or exceeding the max work-interval
         length). apps/web's Server Actions re-validate before calling
         this API, so this response is reachable only via a non-standard
-        client or a bypassed form.
+        client or a bypassed form. `detail` is always a plain string
+        built from field name + message — apps/api installs a custom
+        handler for this response; it never echoes the submitted field
+        value (see plan.md T4 Design decisions — the framework's default
+        validation-error handler echoes the offending input, which would
+        leak a submitted password).
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
@@ -165,7 +170,7 @@ paths:
               required: [email, password]
               properties:
                 email: { type: string, format: email }
-                password: { type: string, minLength: 8 }
+                password: { type: string, minLength: 8, maxLength: 128 }
       responses:
         "201":
           description: Account created.
@@ -184,7 +189,11 @@ paths:
     post:
       summary: >
         Verify email + password. Called from NextAuth's Credentials
-        `authorize()` — never reachable from the browser.
+        `authorize()` — never reachable from the browser. Runs a
+        password-hash comparison against a fixed dummy hash when the
+        email is unknown, so an unknown-email 401 and a
+        wrong-password 401 cost the same wall-clock time (see plan.md
+        T4 Design decisions).
       parameters:
         - $ref: "#/components/parameters/InternalSecretHeader"
       requestBody:
@@ -196,13 +205,14 @@ paths:
               required: [email, password]
               properties:
                 email: { type: string, format: email }
-                password: { type: string }
+                password: { type: string, maxLength: 128 }
       responses:
         "200":
           description: Credentials valid.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/User" }
+        "422": { $ref: "#/components/responses/ValidationError" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
   /tasks:

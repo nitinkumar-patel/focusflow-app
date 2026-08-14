@@ -59,3 +59,13 @@ docs/knowledge/*.lock.stale-*
 
 venv/
 .venv/
+.loop-run/
+
+# FocusFlow app — secrets and generated output. .env.example is the only
+# committed env file (docs/architecture/reference.md § Configuration).
+.env
+.env.*
+!.env.example
+node_modules/
+.next/
+apps/api/.venv/

@@ -130,10 +130,10 @@ tasks, not most — the work-loop skill covers when it's the right tool.
 
 ```bash
 docker compose up --build            # one-time setup / run the whole stack
-pytest                               # run tests, from apps/api/
-npm test                             # run tests, from apps/web/
+docker compose exec api pytest       # run api tests (needs the db service; no host port)
+npm test                             # run web tests, from apps/web/
 docker compose exec api pytest && (cd apps/web && npm test)  # run all tests
-(cd apps/api && ruff check .) && (cd apps/web && npm run lint)  # lint + format check
+docker compose exec api ruff check . && (cd apps/web && npm run lint)  # lint + format check (ruff is container-only: only the api image's `dev` stage has it installed)
 docker compose build                                # produce build artifacts (all images)
 ```
 
@@ -146,13 +146,13 @@ docker compose build                                # produce build artifacts (a
 docker compose up -d --build            # deploy: bring the self-hosted stack up
 curl -f http://localhost/healthz        # smoke: post-deploy end-to-end health check
 docker compose down                     # teardown: tear down a failed or ephemeral deploy
-docker compose exec api python -m app.seed  # seed test/mock data for the smoke probe
+docker compose exec -e SEED_USER_EMAIL -e SEED_USER_PASSWORD api python -m app.seed  # seed a test user; SEED_USER_EMAIL required, SEED_USER_PASSWORD optional (a random one is generated and printed once if omitted) — `docker compose exec` does not forward host env without `-e`
 ```
 
 ## Code style
 
 We don't list style rules here — the linter does that job better than prose can.
-Run `ruff check .` (in `apps/api/`) or `npm run lint` (in `apps/web/`) and
+Run `docker compose exec api ruff check .` or `npm run lint` (in `apps/web/`) and
 follow what it tells you. If something is genuinely
 ambiguous to a linter (naming, file organization, error handling philosophy),
 it's covered in [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md).

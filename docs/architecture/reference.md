@@ -103,11 +103,16 @@
   validated at the FastAPI boundary via Pydantic models; Next.js
   Server Actions re-validate before calling FastAPI (defense in depth at
   the one boundary the browser can reach).
-- **Configuration & environments.** Config via environment variables,
-  loaded per-service from a `.env` file consumed by `docker-compose.yml`
-  (see `.env.example` at the repo root once the skeleton lands). Secrets
-  (`INTERNAL_API_SECRET`, `NEXTAUTH_SECRET`, DB credentials) are never
-  committed; only `.env.example` with placeholder values is.
+- **Configuration & environments.** Config via environment variables.
+  Compose's root `.env` drives variable *interpolation* inside
+  `docker-compose.yml` only — each service that needs the values at
+  runtime declares its own `env_file: .env` (or `environment:`) entry.
+  Secrets (`INTERNAL_API_SECRET`, the NextAuth secret, DB credentials)
+  are never committed; `.env.example` at the repo root ships every
+  secret **empty**, not a placeholder value — both `apps/api` and
+  `apps/web` refuse to start on an unset/empty required secret rather
+  than run with a guessable or absent one (see the walking-skeleton
+  spec's AC19 for the concrete rule this generalizes from).
 - **Testing standards.** FastAPI: `pytest` + `httpx.AsyncClient` for
   route-level tests against a test Postgres (or SQLite for pure unit
   tests of pure logic). Next.js: component/unit tests colocated with
