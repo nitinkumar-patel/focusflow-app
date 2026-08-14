@@ -31,6 +31,9 @@ include = ["app*"]
 [tool.ruff]
 line-length = 100
 target-version = "py313"
+# Alembic-generated migration bodies are boilerplate we don't hand-edit
+# for style; linting them just fights the generator on every revision.
+extend-exclude = ["migrations/versions"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
