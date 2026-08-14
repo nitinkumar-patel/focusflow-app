@@ -1,6 +1,6 @@
 # Spec: Walking skeleton
 
-- **Status:** Draft <!-- Draft | Approved | Implementing | Shipped | Archived -->
+- **Status:** Implementing <!-- Draft | Approved | Implementing | Shipped | Archived -->
 - **Owner:** project owner <!-- single-maintainer project; see docs/product/briefs/focusflow.md -->
 - **Plan:** [`plan.md`](plan.md)
 - **Constrained by:** ADR-0001
