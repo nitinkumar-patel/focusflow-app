@@ -155,7 +155,14 @@ spec's design-intent bar.
   `verify_password` (or an equivalent spy point) is invoked even when
   the email doesn't exist, not a flaky wall-clock timing measurement.
 - **Task-list empty-state and task creation without reload** (AC3, AC4):
-  visual / manual QA, exercised in T11.
+  visual / manual QA, exercised in T11 — in an environment with no
+  browser available, this means driving the real Server Action via
+  curl replicating Next.js's wire protocol and confirming the response
+  is an RSC flight payload (not an HTML document), which is what
+  "without a page reload" means at the protocol level; see
+  `docs/specs/walking-skeleton/qa-log.md`'s verification-methodology
+  caveat for what this can and can't prove versus an actual browser
+  (round-3 REVIEW finding).
 - **Breaks are never recorded as sessions** (AC7): covered by T12's
   component test (fake timers, mocked record-session action) asserting
   zero calls across break transitions — not the FastAPI surface, since
@@ -196,9 +203,17 @@ spec's design-intent bar.
 - **Signup → login → create task → run one full work interval → see it
   in the chart, end to end through Docker Compose** (AC1, AC2, AC4, AC6,
   AC8, AC10 together): visual / manual QA, exercised as an **end-to-end
-  (E2E)** journey against the real running stack (`docker compose up`,
-  then drive the browser). This is the walking-skeleton's core proof and
-  cannot be faked by a narrower test.
+  (E2E)** journey against the real running stack (`docker compose up`).
+  This is the walking-skeleton's core proof and cannot be faked by a
+  narrower test — the intended mechanism is driving a real browser;
+  where no browser is available in the executing environment (this
+  build), the substitute is curl replicating Next.js's Server Action
+  wire protocol against the same running containers, which proves every
+  server-side effect (session established, row written, next response
+  reflects it) but — per `qa-log.md`'s verification-methodology caveat
+  — cannot itself observe client-side rendering the way a browser would
+  (round-3 REVIEW finding: this line previously implied the browser
+  drive always happens, without naming the substitute actually used).
 - **Clean-clone self-host via the guide, including the TLS warning**
   (AC15, AC20): visual / manual QA, exercised in T15 — a fresh clone,
   following only the documented steps.

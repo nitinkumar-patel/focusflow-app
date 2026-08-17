@@ -68,14 +68,16 @@ internal port directly, except where noted.
 - **AC11 (web running-artifact half):** `docker compose logs web api`
   grepped for the plaintext test password, `INTERNAL_API_SECRET`,
   `AUTH_SECRET`, and `POSTGRES_PASSWORD` values — no match for any.
-- **AC21 (wildcard-origins absence):**
-  `! grep -rn 'allowedOrigins' apps/web/next.config.ts apps/web/lib/auth.ts
-  | grep -q '\*'` — passes (round-2 REVIEW fix: the original check
-  scanned only `lib/auth.ts`, where Next.js's `allowedOrigins` setting
-  can never appear since it's a `next.config.ts` option, making the
-  original check vacuous regardless of outcome; re-verified against
-  `apps/web/next.config.ts`, which has no `allowedOrigins` entry at
-  all).
+- **AC21 (wildcard-origins/trustHost absence):**
+  `! grep -rn 'allowedOrigins\|trustHost' apps/web/next.config.ts
+  apps/web/lib/auth.ts | grep -q '\*'` — passes (round-2 REVIEW fix: the
+  original check scanned only `lib/auth.ts` for `allowedOrigins`, which
+  can never appear there since it's a `next.config.ts` option, making
+  the original check vacuous regardless of outcome; round-3 correction:
+  the round-2 fix still didn't match `trustHost`, spec.md's other named
+  field — `apps/web/lib/auth.ts` does set `trustHost: true`, which the
+  now-widened pattern correctly matches and confirms is not a literal
+  `*`).
 - **AC17 (rate limiting, whole-stack):** burst of 10 rapid
   `GET /login` requests through Nginx — first 6 returned `200`
   (burst=5 + the base rate), requests 7-10 returned `429`.
@@ -86,15 +88,24 @@ guide's warning covers this — there is no TLS to test, by design, on
 `PomodoroTimer.test.tsx`'s fake-timer tests, since no browser was
 available in this environment — see T12's commit for that discipline).
 
-**Verification-methodology caveat (round-2 REVIEW finding):** every
+**Verification-methodology caveat (round-2 REVIEW finding; wording
+corrected in round-3 — the entry originally misquoted AC4's clause as
+matching AC8's instead of citing each criterion's actual text):** every
 check above drove Server Actions via curl replicating the RSC wire
 protocol, not a real browser. This proves the server-side behavior
 (the request succeeds, the database changes, the next response reflects
 it) but cannot distinguish a client-side re-render from a full document
-reload — so AC4's and AC8's "without a manual page refresh" /
-"without a manual page refresh" clauses are verified indirectly (the
-response is an RSC flight payload, per `revalidatePath`, not an HTML
-document) rather than observed directly in a browser.
+reload — so AC4's "without a page reload" and AC8's "without a manual
+page refresh" clauses are both verified indirectly (the response is an
+RSC flight payload, per `revalidatePath`, not an HTML document) rather
+than observed directly in a browser.
+
+All test data from this section (the QA user, its task, and both
+sessions) was deleted from the database after this pass;
+`POMODORO_TEST_SHORT_INTERVALS` was reverted to empty in `.env`
+(round-3 correction: this teardown note was previously misplaced under
+the AC13 section below, several sections after the T14 pass it
+actually describes).
 
 ## Round-1-introduced error states — 2026-08-17
 
@@ -115,6 +126,34 @@ no test or QA record until now (round-2 REVIEW finding #2).
   forcing a natural work-interval completion to fail requires
   controlling the API response mid-flight — cleaner as a mocked
   component test than a race against a real container.
+
+This section's QA user was deleted from the database afterward (round-3
+correction: the deletion previously happened but was never logged here).
+
+## recordSessionAction's server-side re-validation — 2026-08-17
+
+Round-2 Concern #6 added shape/bound checks to `recordSessionAction`
+(UUID-shaped `taskId`, parseable timestamps, `durationSeconds` bounded
+to `1..1500`); round-3 REVIEW flagged that nothing drove the reject
+paths, and that the vitest suite's `taskId="task-1"` fixture would
+itself fail the new UUID check were the action not mocked out (fixed
+separately — the fixture is now a real UUID shape).
+
+Invoked `recordSessionAction` directly via the `Next-Action` header
+protocol (the same mechanism a client-side `recordSessionAction(...)`
+call compiles to — extracted id `78d47ce8ba236153ddf3c309c2261b32b2dde09632`
+from the rebuilt `server-reference-manifest.json`), against a real
+signed-up user with a real task:
+
+- `taskId="not-a-uuid"` (otherwise-valid timestamps/duration): `200`,
+  body `{"ok":false,"error":"Invalid session data."}`.
+- `durationSeconds=2000` (exceeds `MAX_WORK_INTERVAL_SECONDS=1500`,
+  otherwise-valid `taskId`/timestamps): `200`,
+  `{"ok":false,"error":"Invalid session data."}`.
+- Confirmed neither request reached `apps/api`: `pomodoro_sessions` had
+  zero rows for this user afterward.
+
+Test user, task, and any sessions deleted afterward.
 
 ## AC13 primary-action count per screen — 2026-08-17
 
@@ -138,9 +177,9 @@ task-commit prose, never observed (round-2 REVIEW finding #3).
 - `/analytics`: zero buttons besides "Log out" (layout chrome) —
   confirms the screen's read-only design (no primary action at all).
 
-All test data (the QA user, its task, and both sessions) was deleted
-from the database after this pass; `POMODORO_TEST_SHORT_INTERVALS` was
-reverted to empty in `.env`.
+This section reused the error-states section's QA user (same session,
+one task created for the button-count checks above) — already deleted
+per that section's teardown note.
 
 ## T15: Self-host guide clean-clone check — 2026-08-17
 

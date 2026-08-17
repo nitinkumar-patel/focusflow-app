@@ -1,5 +1,6 @@
 import { TaskForm } from "@/components/TaskForm";
 import { TaskList } from "@/components/TaskList";
+import { safeErrorMessage } from "@/lib/api-client";
 import { resolveDurations } from "@/lib/pomodoro-durations";
 
 import { getTasks } from "./actions";
@@ -19,7 +20,7 @@ export default async function TasksPage() {
       {result.ok ? (
         <TaskList tasks={result.data} durationsSeconds={durationsSeconds} />
       ) : (
-        <p role="alert">{result.error}</p>
+        <p role="alert">{safeErrorMessage(result)}</p>
       )}
     </div>
   );

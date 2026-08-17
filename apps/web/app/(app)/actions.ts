@@ -10,9 +10,11 @@ import { auth, signOut } from "@/lib/auth";
 // actions.ts files — stays exhaustive rather than a spot-check. The
 // session check below is a real branch (round-2 REVIEW finding: an
 // earlier version called `auth()` and discarded the result, which the
-// grep couldn't distinguish from a load-bearing check) — an already-
-// logged-out caller redirects without invoking NextAuth's signOut
-// machinery against a session that isn't there.
+// grep couldn't distinguish from a load-bearing check) — reachable
+// whenever a tab has been open long enough for its session to expire
+// server-side (AC18's session lifetime) before the still-rendered
+// "Log out" button is clicked; redirects without invoking NextAuth's
+// signOut machinery against a session that's no longer there.
 export async function logoutAction(): Promise<void> {
   const session = await auth();
   if (!session) {

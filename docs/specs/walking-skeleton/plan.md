@@ -129,14 +129,19 @@ burst probe against the running Nginx (T14).
   before implementing T11/T12/T13 (see Approach's framework-currency
   note). Traces to: AC4, AC8.
 - **The AC5 interval lengths (25/5/15 minutes) are independently
-  hardcoded, with a comment citing AC5, in both
-  `apps/web/lib/pomodoro-cycle.ts` and `apps/api`'s session-duration
-  validator** — not shared via an env var or generated file. AC5 is the
-  single canonical *source of truth* for the values; the spec's
-  Ask-first boundary on changing them is what keeps the two copies from
-  drifting silently (a change to either without the other is a spec
-  violation, not an implementation freedom). Traces to: AC5, T7's
-  duration-ceiling check.
+  hardcoded, with a comment citing AC5, in `apps/web/lib/pomodoro-
+  durations.ts`, `apps/api`'s session-duration validator
+  (`MAX_WORK_INTERVAL_SECONDS`), and (round-3 REVIEW correction — this
+  entry previously named `pomodoro-cycle.ts`, which only sequences
+  interval *kinds* and never held the duration values, and omitted this
+  third copy entirely) `apps/web/app/(app)/tasks/actions.ts`'s own
+  `MAX_WORK_INTERVAL_SECONDS`, added alongside `recordSessionAction`'s
+  round-2 re-validation** — not shared via an env var or generated
+  file. AC5 is the single canonical *source of truth* for the values;
+  the spec's Ask-first boundary on changing them is what keeps all
+  three copies from drifting silently (a change to any one without the
+  others is a spec violation, not an implementation freedom). Traces
+  to: AC5, T7's duration-ceiling check.
 - **The `POMODORO_TEST_SHORT_INTERVALS` override is read server-side and
   passed down as props — never as a `NEXT_PUBLIC_*` var.** A non-prefixed
   env var is not inlined into the client bundle. The gate is *presence*,
@@ -144,11 +149,16 @@ burst probe against the running Nginx (T14).
   separate deployment tier, and `next build`'s `output: "standalone"`
   bakes `NODE_ENV=production` into the server bundle at build time, so a
   `NODE_ENV` runtime check cannot work here. **Delivery mechanics
-  (round-4 finding):** `docker-compose.yml` gives `web` (and `api`)
-  `env_file: .env` explicitly — Compose's root `.env` only drives
-  variable *interpolation* inside `docker-compose.yml` itself, not
-  container environment, so each service needs its own `env_file`/
-  `environment:` entry to actually receive the vars at runtime.
+  (round-4 finding; env-var mechanism corrected by round-2 REVIEW
+  finding):** `docker-compose.yml` gives `web` and `api` each an
+  explicit `environment:` list naming only the vars that service reads
+  (not the shared `env_file: .env` this originally specified, which
+  handed every service every secret — round-2 REVIEW Nit) — Compose's
+  root `.env` only drives variable *interpolation* inside
+  `docker-compose.yml` itself (the `${VAR}` references in each
+  `environment:` entry), not container environment directly, so each
+  service still needs its own `environment:` (or `env_file`) entry to
+  actually receive the vars at runtime.
   `apps/web/app/(app)/tasks/page.tsx` reads the NextAuth session (making
   it dynamically rendered, never statically optimized at build time), so
   `process.env.POMODORO_TEST_SHORT_INTERVALS` is evaluated per-request
@@ -533,9 +543,14 @@ Recorded here per spec Boundaries § Ask first, round-1 REVIEW finding.
 - Root `docker-compose.yml`: services `db` (`postgres:17-alpine`, named
   volume, internal network only, healthcheck), `api` (build
   `apps/api/Dockerfile` — `dev` target with dev deps, `depends_on: db:
-  condition: service_healthy`, `env_file: .env`, internal network only,
-  entrypoint runs `alembic upgrade head` then execs `uvicorn`), `web`
-  (build `apps/web/Dockerfile`, `env_file: .env`, internal network only),
+  condition: service_healthy`, explicit `environment:` list naming only
+  `INTERNAL_API_SECRET`/`POSTGRES_*` (round-2 REVIEW fix — not the
+  shared `env_file: .env` this line originally specified), internal
+  network only, entrypoint runs `alembic upgrade head` then execs
+  `uvicorn`), `web` (build `apps/web/Dockerfile`, its own explicit
+  `environment:` list — `AUTH_SECRET`/`INTERNAL_API_SECRET`/
+  `API_BASE_URL`/`POMODORO_TEST_SHORT_INTERVALS` — internal network
+  only),
   `nginx` (build `apps/nginx/Dockerfile`, publishes `80:80` — the *only*
   published port in the whole file, per spec Never-do).
 - `apps/api/`: FastAPI app factory in `app/main.py` with `GET /healthz`
@@ -574,11 +589,21 @@ Recorded here per spec Boundaries § Ask first, round-1 REVIEW finding.
 - `.env.example` at repo root, **every secret shipped empty**
   (`INTERNAL_API_SECRET=`, the NextAuth secret var `=`) with a comment
   pointing at `openssl rand -hex 32`; also `POSTGRES_*` (no combined
-  `DATABASE_URL` var — `env_file:` doesn't support `${VAR}`
-  interpolation, so `apps/api/app/core/config.py` builds
-  `database_url` from the separate `POSTGRES_*` parts instead —
-  round-2 REVIEW correction, this line previously listed a
-  `DATABASE_URL` var that was never actually shipped),
+  `DATABASE_URL` var — a `.env` file's own values aren't recursively
+  interpolated within that same file, so a line like
+  `DATABASE_URL=postgresql://...${POSTGRES_PASSWORD}...` inside `.env`
+  would ship the literal string `${POSTGRES_PASSWORD}`, not the actual
+  password, regardless of whether the consuming compose service uses
+  `env_file:` or an explicit `environment:` list — `.env`'s values only
+  ever get *read into* `docker-compose.yml`'s own `${VAR}`
+  interpolation, never expanded against each other. So
+  `apps/api/app/core/config.py` builds `database_url` from the separate
+  `POSTGRES_*` parts instead — round-2 REVIEW correction, this line
+  previously listed a `DATABASE_URL` var that was never actually
+  shipped; round-3 REVIEW correction, the original explanation
+  over-attributed the constraint to `env_file:` specifically, which no
+  longer even applies since round-2 switched both services to explicit
+  `environment:` lists),
   `API_BASE_URL` (the internal `http://api:8000` address `api-client.ts`
   targets), `POMODORO_TEST_SHORT_INTERVALS=` (also empty by default).
   `.env`, `.env.*` (with `!.env.example`), `node_modules/`, and `.next/`
@@ -1016,14 +1041,18 @@ AC21-verification note).
   succeeding through Nginx *is* AC21's functional proof — it fails
   immediately if the forwarded-header config is wrong (Design
   decisions); separately, confirm an unauthenticated request to
-  `/tasks` redirects to `/login` (AC12); `! grep -rn 'allowedOrigins'
-  apps/web/next.config.ts apps/web/lib/auth.ts | grep -q '\*'` confirms
-  no wildcard allowed-origins workaround was added (AC21) — **EXECUTE-time
-  correction (round-2 REVIEW finding)**: the original version scanned only
-  `lib/auth.ts`, where Next.js's `allowedOrigins` setting
+  `/tasks` redirects to `/login` (AC12); `! grep -rn
+  'allowedOrigins\|trustHost' apps/web/next.config.ts apps/web/lib/auth.ts
+  | grep -q '\*'` confirms no wildcard allowed-origins/trustHost
+  workaround was added (AC21) — **EXECUTE-time correction (round-2 REVIEW
+  finding)**: the original version scanned only `lib/auth.ts` for
+  `allowedOrigins`, where that Next.js Server Actions setting
   (`experimental.serverActions.allowedOrigins` in `next.config.ts`) can
   never appear, making the check vacuously pass regardless of whether a
-  wildcard was ever added; capture `docker compose
+  wildcard was ever added; **round-3 correction**: the round-2 fix still
+  didn't match `trustHost`, spec.md's other named field, leaving a
+  `trustHost: "*"` workaround undetected — now checked as an alternation;
+  capture `docker compose
   logs web api` and grep it for the test password and both secrets as
   the running-artifact half of AC11; run a scripted burst of requests at
   `/login` and confirm a 429 appears once the configured threshold is

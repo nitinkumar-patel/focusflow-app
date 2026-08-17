@@ -26,7 +26,7 @@ describe("PomodoroTimer", () => {
   });
 
   it("runs work -> short break -> work automatically and calls the record-session action only after work intervals", async () => {
-    render(<PomodoroTimer taskId="task-1" durationsSeconds={durationsSeconds} />);
+    render(<PomodoroTimer taskId="11111111-1111-4111-8111-111111111111" durationsSeconds={durationsSeconds} />);
 
     fireEvent.click(screen.getByRole("button", { name: /start focus session/i }));
     expect(screen.queryByText(/Focus:/)).not.toBeNull();
@@ -81,7 +81,7 @@ describe("PomodoroTimer", () => {
   });
 
   it("stopping a work interval early records nothing", async () => {
-    render(<PomodoroTimer taskId="task-1" durationsSeconds={durationsSeconds} />);
+    render(<PomodoroTimer taskId="11111111-1111-4111-8111-111111111111" durationsSeconds={durationsSeconds} />);
 
     fireEvent.click(screen.getByRole("button", { name: /start focus session/i }));
     await act(async () => {
@@ -99,7 +99,7 @@ describe("PomodoroTimer", () => {
     // tick-counting timer would stay stuck near the full duration; a
     // deadline-based one notices the deadline is already past on
     // whatever tick does fire.
-    render(<PomodoroTimer taskId="task-1" durationsSeconds={durationsSeconds} />);
+    render(<PomodoroTimer taskId="11111111-1111-4111-8111-111111111111" durationsSeconds={durationsSeconds} />);
 
     fireEvent.click(screen.getByRole("button", { name: /start focus session/i }));
 
@@ -120,7 +120,7 @@ describe("PomodoroTimer", () => {
       ok: false,
       error: "duplicate session",
     });
-    render(<PomodoroTimer taskId="task-1" durationsSeconds={durationsSeconds} />);
+    render(<PomodoroTimer taskId="11111111-1111-4111-8111-111111111111" durationsSeconds={durationsSeconds} />);
 
     fireEvent.click(screen.getByRole("button", { name: /start focus session/i }));
     await act(async () => {

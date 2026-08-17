@@ -64,3 +64,15 @@ export async function apiFetch<T>(
   const data = (await response.json()) as T;
   return { ok: true, data };
 }
+
+// A page rendering a failed ApiResult should not echo it unconditionally
+// — `status` set means apps/api returned a real HTTP error response,
+// whose `detail` (or "server misconfigured"/"request failed") isn't
+// meant for an end user and could name what's broken in the deployment.
+// No `status` means apiFetch never got a response at all (network
+// failure) or the caller's own pre-flight check failed (e.g. "You must
+// be logged in.") — both of those strings are already safe, static
+// copy written for display (round-3 REVIEW finding).
+export function safeErrorMessage(result: { error: string; status?: number }): string {
+  return result.status === undefined ? result.error : "Something went wrong. Try again.";
+}

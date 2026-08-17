@@ -1,4 +1,5 @@
 import { FocusTimeChart } from "@/components/FocusTimeChart";
+import { safeErrorMessage } from "@/lib/api-client";
 
 import { getFocusTime } from "./actions";
 
@@ -10,7 +11,7 @@ export default async function AnalyticsPage() {
     return (
       <div>
         <h1>Analytics</h1>
-        <p role="alert">{result.error}</p>
+        <p role="alert">{safeErrorMessage(result)}</p>
       </div>
     );
   }
