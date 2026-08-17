@@ -4,12 +4,17 @@ FastAPI dependencies every router uses."""
 from __future__ import annotations
 
 import hmac
+import uuid
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
-from fastapi import Header, HTTPException
+from fastapi import Depends, Header, HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.db.session import get_db_session
+from app.models import User
 
 _hasher = PasswordHasher()
 
@@ -38,3 +43,27 @@ async def require_internal_secret(x_internal_secret: str | None = Header(default
         raise HTTPException(status_code=401, detail="unauthorized")
     if not hmac.compare_digest(x_internal_secret, settings.internal_api_secret):
         raise HTTPException(status_code=401, detail="unauthorized")
+
+
+async def require_user_id(
+    x_user_id: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db_session),
+) -> uuid.UUID:
+    """Reads X-User-Id, 401 if absent, malformed, or unknown.
+
+    apps/web attaches this header only after reading it from the
+    caller's validated NextAuth session (spec AC16) — this dependency
+    doesn't and can't verify that provenance itself, it only confirms
+    the id names a real user.
+    """
+    if not x_user_id:
+        raise HTTPException(status_code=401, detail="unauthorized")
+    try:
+        user_id = uuid.UUID(x_user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="unauthorized") from exc
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=401, detail="unauthorized")
+    return user_id

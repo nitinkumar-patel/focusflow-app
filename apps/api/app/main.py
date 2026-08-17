@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from app.auth.router import router as auth_router
 from app.core.config import settings
 from app.db.session import check_db_connection
+from app.tasks.router import router as tasks_router
 
 # Fail closed before the app object even exists — see AC19.
 settings.fail_closed_on_missing_secrets()
@@ -42,7 +43,8 @@ async def healthz() -> JSONResponse:
 
 
 app.include_router(auth_router)
+app.include_router(tasks_router)
 
-# More routers land here as each task completes (T5/T7 tasks, T8
-# analytics) — no defensive import-swallowing, since a real import
-# error in a router module should fail loudly, not be masked.
+# T8's analytics router lands here next — no defensive
+# import-swallowing, since a real import error in a router module
+# should fail loudly, not be masked.
