@@ -36,7 +36,7 @@ class Task(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
     )
     title: Mapped[str] = mapped_column(nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -57,7 +57,7 @@ class PomodoroSession(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     task_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=False
+        UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=False, index=True
     )
     started_at: Mapped[datetime] = mapped_column(_TZ_DATETIME, nullable=False)
     ended_at: Mapped[datetime] = mapped_column(_TZ_DATETIME, nullable=False)

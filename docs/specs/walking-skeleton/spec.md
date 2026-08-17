@@ -208,21 +208,21 @@ spec's design-intent bar.
 
 ## Acceptance Criteria
 
-- [ ] AC1: Given no account, when a person submits a valid email and a
+- [x] AC1: Given no account, when a person submits a valid email and a
       password between 8 and 128 characters on the sign-up screen, they
       are registered and immediately logged in (no email verification
       step).
-- [ ] AC2: Given an existing account, when a person submits the correct
+- [x] AC2: Given an existing account, when a person submits the correct
       email/password on the login screen, they reach the task list;
       given an incorrect password, they see an inline error and are not
       logged in.
-- [ ] AC3: Given a logged-in user with an empty task list, when the page
+- [x] AC3: Given a logged-in user with an empty task list, when the page
       loads, the user sees an empty-state message and a way to add a
       task.
-- [ ] AC4: Given a logged-in user, when they submit a non-empty task
+- [x] AC4: Given a logged-in user, when they submit a non-empty task
       title, a new task appears in their task list without a page
       reload.
-- [ ] AC5: Given a task, when the user starts a Pomodoro run on it, a
+- [x] AC5: Given a task, when the user starts a Pomodoro run on it, a
       25-minute work-interval countdown begins; when that interval
       finishes naturally, a 5-minute short-break countdown begins
       automatically, and the cycle continues, inserting a 15-minute long
@@ -233,31 +233,31 @@ spec's design-intent bar.
       changed — other sections restating them for implementation
       purposes (a TypeScript constant, a test's expected value) are
       instances of this criterion, not competing definitions of it.
-- [ ] AC6: Given a work interval that finishes naturally, FocusFlow
+- [x] AC6: Given a work interval that finishes naturally, FocusFlow
       records exactly one completed session against that task (`POST
       /tasks/{task_id}/sessions`); given a work interval the user stops
       before it finishes, no session is recorded.
-- [ ] AC7: Given a break interval (short or long) finishing naturally or
+- [x] AC7: Given a break interval (short or long) finishing naturally or
       being stopped early, no session is ever recorded for it — sessions
       represent completed work intervals only.
-- [ ] AC8: Given a user with at least one recorded session, when they
+- [x] AC8: Given a user with at least one recorded session, when they
       open the analytics view, they see a bar chart of focus minutes per
       day for the last 7 days and a list of total focus minutes per
       task, both reflecting sessions recorded in this browser session
       without a manual page refresh.
-- [ ] AC9: Given a logged-in user with no recorded sessions, when they
+- [x] AC9: Given a logged-in user with no recorded sessions, when they
       open the analytics view, they see an empty-state message instead
       of an empty chart.
-- [ ] AC10: Given the full stack running via `docker compose up` from a
+- [x] AC10: Given the full stack running via `docker compose up` from a
       clean volume, `GET /healthz` through Nginx returns 200, and the
       signup → task → session → analytics journey above completes
       against the real containers (no component mocked).
-- [ ] AC11: No password (plaintext or hashed) appears in any HTTP
+- [x] AC11: No password (plaintext or hashed) appears in any HTTP
       response body — including a validation-error (422) body — error
       message, or log line, on either `apps/api` or `apps/web`.
-- [ ] AC12: Given an unauthenticated visitor, when they request `/tasks`
+- [x] AC12: Given an unauthenticated visitor, when they request `/tasks`
       or `/analytics`, they are redirected to `/login`.
-- [ ] AC13: The sign-up, login, and tasks screens each render exactly one
+- [x] AC13: The sign-up, login, and tasks screens each render exactly one
       primary, verb-labelled action control for the screen's main
       purpose ("Sign up", "Log in", "Add task"). Any per-task control —
       "Start focus session" and, once a run is in progress, "Stop" — is
@@ -268,21 +268,21 @@ spec's design-intent bar.
       action, and don't count against this limit on either authenticated
       screen. The analytics screen has no primary action of its own —
       only the shared shell's chrome.
-- [ ] AC14: Given two distinct user accounts, a user's task list,
+- [x] AC14: Given two distinct user accounts, a user's task list,
       recorded sessions, and analytics never include the other user's
       data.
-- [ ] AC15: Given a clean clone of the repository, following
+- [x] AC15: Given a clean clone of the repository, following
       `docs/guides/how-to/self-host-with-docker-compose.md` verbatim
       (no undocumented steps) brings the stack up and reaches the
       sign-up screen.
-- [ ] AC16: The `X-User-Id` value `apps/api` receives is derived solely
+- [x] AC16: The `X-User-Id` value `apps/api` receives is derived solely
       from the caller's validated NextAuth session — no Server Action or
       Route Handler accepts a user id as client-supplied input. Every
       Server Action or Route Handler that reads or mutates user data
       independently verifies that session and rejects before any side
       effect if it's missing or invalid; the route-interception redirect
       (AC12) is a UX convenience, not the authorization boundary.
-- [ ] AC17: Given repeated rapid requests to `/signup`, `/login`,
+- [x] AC17: Given repeated rapid requests to `/signup`, `/login`,
       `/api/auth/*` (NextAuth's own credential-check routes), or
       `/healthz` from the same client, Nginx returns 429 once the
       request rate exceeds 20 requests/minute (burst 5) for the first
@@ -290,25 +290,25 @@ spec's design-intent bar.
       than forwarding every request to `web`/`api`. These thresholds are
       this spec's canonical values, the same way AC5 is canonical for
       interval lengths.
-- [ ] AC18: A session has a bounded lifetime (see the plan for the exact
+- [x] AC18: A session has a bounded lifetime (see the plan for the exact
       value), and every authenticated screen offers a "Log out" control
       that ends the session immediately — a request to `/tasks` after
       logging out redirects to `/login`.
-- [ ] AC19: `.env.example` ships every secret variable
+- [x] AC19: `.env.example` ships every secret variable
       (`INTERNAL_API_SECRET`, the NextAuth secret, `POSTGRES_PASSWORD`)
       empty, not a placeholder value. Given either app started with a
       required secret unset or empty, it refuses to start and serve
       traffic rather than running with a guessable or absent secret.
-- [ ] AC20: `docs/guides/how-to/self-host-with-docker-compose.md` states
+- [x] AC20: `docs/guides/how-to/self-host-with-docker-compose.md` states
       plainly that the stack terminates plaintext HTTP on port 80 and
       recommends a TLS-terminating proxy before exposing it beyond
       localhost.
-- [ ] AC21: Nginx forwards `Host`, `X-Forwarded-For`, `X-Forwarded-Proto`,
+- [x] AC21: Nginx forwards `Host`, `X-Forwarded-For`, `X-Forwarded-Proto`,
       and `X-Forwarded-Host` to `web`, so Next.js's Server Action
       Origin/Host check and NextAuth's callback URLs work correctly
       behind the proxy; no component configures a wildcard
       allowed-origins list as a workaround.
-- [ ] AC22: A CI workflow exists that runs a secret scanner, a dependency
+- [x] AC22: A CI workflow exists that runs a secret scanner, a dependency
       vulnerability scan for both ecosystems (`npm audit` or equivalent,
       `pip-audit`), and a container image scan, on every push/PR.
 

@@ -4,7 +4,18 @@ import { getFocusTime } from "./actions";
 
 // Read-only screen — no primary action control (AC13).
 export default async function AnalyticsPage() {
-  const { by_day: byDay, by_task: byTask } = await getFocusTime();
+  const result = await getFocusTime();
+
+  if (!result.ok) {
+    return (
+      <div>
+        <h1>Analytics</h1>
+        <p role="alert">Couldn&apos;t reach the server, try again.</p>
+      </div>
+    );
+  }
+
+  const { by_day: byDay, by_task: byTask } = result.data;
 
   if (byTask.length === 0) {
     return (

@@ -28,60 +28,77 @@ interface PomodoroTimerProps {
 export function PomodoroTimer({ taskId, durationsSeconds }: PomodoroTimerProps) {
   const [kind, setKind] = useState<IntervalKind>(() => firstInterval().kind);
   const [completedWorkIntervals, setCompletedWorkIntervals] = useState(0);
-  const [remainingSeconds, setRemainingSeconds] = useState(durationsSeconds.work);
   const [running, setRunning] = useState(false);
   const [startedAt, setStartedAt] = useState<Date | null>(null);
+  // Absolute deadline (not a tick count) — a background tab throttles
+  // setInterval, but comparing against Date.now() on whatever tick does
+  // fire still completes the interval at the right wall-clock time
+  // instead of silently running for hours.
+  const [deadline, setDeadline] = useState<number | null>(null);
+  const [remainingSeconds, setRemainingSeconds] = useState(durationsSeconds.work);
+  const [recordError, setRecordError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!running) {
+    if (!running || deadline === null) {
       return;
     }
 
     const id = setInterval(() => {
-      setRemainingSeconds((current) => {
-        if (current > 1) {
-          return current - 1;
-        }
+      const secondsLeft = Math.ceil((deadline - Date.now()) / 1000);
 
-        // This interval just finished naturally.
-        const finishedKind = kind;
-        const finishedStartedAt = startedAt ?? new Date();
-        const finishedDurationSeconds = durationsSeconds[finishedKind];
+      if (secondsLeft > 0) {
+        setRemainingSeconds(secondsLeft);
+        return;
+      }
 
-        if (finishedKind === "work") {
-          const endedAt = new Date(
-            finishedStartedAt.getTime() + finishedDurationSeconds * 1000,
-          );
-          // Fire-and-forget: the timer keeps ticking regardless of the
-          // network round trip. AC6/AC7 — only a completed work
-          // interval reaches here, never a break.
-          void recordSessionAction(
-            taskId,
-            finishedStartedAt.toISOString(),
-            endedAt.toISOString(),
-            finishedDurationSeconds,
-          );
-        }
+      // This interval just finished naturally.
+      const finishedKind = kind;
+      const finishedStartedAt = startedAt ?? new Date();
+      const finishedDurationSeconds = durationsSeconds[finishedKind];
+      const finishedEndedAt = new Date(deadline);
 
-        const newCompletedWorkIntervals =
-          finishedKind === "work" ? completedWorkIntervals + 1 : completedWorkIntervals;
-        const next = nextInterval({
-          kind: finishedKind,
-          completedWorkIntervals: newCompletedWorkIntervals,
-        });
+      if (finishedKind === "work") {
+        // AC6/AC7 — only a completed work interval reaches here, never
+        // a break. Awaited (not fire-and-forget) so a failure is
+        // surfaced instead of silently dropping the session.
+        recordSessionAction(
+          taskId,
+          finishedStartedAt.toISOString(),
+          finishedEndedAt.toISOString(),
+          finishedDurationSeconds,
+        )
+          .then((result) => {
+            if (!result.ok) {
+              setRecordError(result.error ?? "Couldn't record this session.");
+            }
+          })
+          .catch(() => setRecordError("Couldn't record this session."));
+      }
 
-        setCompletedWorkIntervals(newCompletedWorkIntervals);
-        setKind(next.kind);
-        setStartedAt(new Date());
-        return durationsSeconds[next.kind];
+      const newCompletedWorkIntervals =
+        finishedKind === "work" ? completedWorkIntervals + 1 : completedWorkIntervals;
+      const next = nextInterval({
+        kind: finishedKind,
+        completedWorkIntervals: newCompletedWorkIntervals,
       });
+      const nextStartedAt = new Date();
+
+      setCompletedWorkIntervals(newCompletedWorkIntervals);
+      setKind(next.kind);
+      setStartedAt(nextStartedAt);
+      setDeadline(nextStartedAt.getTime() + durationsSeconds[next.kind] * 1000);
+      setRemainingSeconds(durationsSeconds[next.kind]);
     }, 1000);
 
     return () => clearInterval(id);
-  }, [running, kind, completedWorkIntervals, startedAt, durationsSeconds, taskId]);
+  }, [running, deadline, kind, completedWorkIntervals, startedAt, durationsSeconds, taskId]);
 
   function handleStart() {
-    setStartedAt(new Date());
+    const now = new Date();
+    setRecordError(null);
+    setStartedAt(now);
+    setDeadline(now.getTime() + durationsSeconds.work * 1000);
+    setRemainingSeconds(durationsSeconds.work);
     setRunning(true);
   }
 
@@ -92,6 +109,7 @@ export function PomodoroTimer({ taskId, durationsSeconds }: PomodoroTimerProps) 
     setKind("work");
     setRemainingSeconds(durationsSeconds.work);
     setStartedAt(null);
+    setDeadline(null);
   }
 
   return (
@@ -106,6 +124,7 @@ export function PomodoroTimer({ taskId, durationsSeconds }: PomodoroTimerProps) 
           Start focus session
         </button>
       )}
+      {recordError ? <span role="alert"> {recordError}</span> : null}
     </span>
   );
 }

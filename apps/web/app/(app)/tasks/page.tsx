@@ -9,14 +9,18 @@ import { getTasks } from "./actions";
 // already-resolved numbers, so the raw override string never ships to
 // the browser (plan.md's Design decisions).
 export default async function TasksPage() {
-  const tasks = await getTasks();
+  const result = await getTasks();
   const durationsSeconds = resolveDurations(process.env.POMODORO_TEST_SHORT_INTERVALS);
 
   return (
     <div>
       <h1>Tasks</h1>
       <TaskForm />
-      <TaskList tasks={tasks} durationsSeconds={durationsSeconds} />
+      {result.ok ? (
+        <TaskList tasks={result.data} durationsSeconds={durationsSeconds} />
+      ) : (
+        <p role="alert">Couldn&apos;t reach the server, try again.</p>
+      )}
     </div>
   );
 }

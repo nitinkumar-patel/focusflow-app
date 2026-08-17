@@ -92,4 +92,26 @@ describe("PomodoroTimer", () => {
     expect(recordSessionAction).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: /start focus session/i })).not.toBeNull();
   });
+
+  it("completes the interval on wall-clock time even if fewer ticks fired than seconds elapsed", async () => {
+    // Simulates a throttled background tab: the browser skips most
+    // setInterval callbacks, but real time has still passed. A
+    // tick-counting timer would stay stuck near the full duration; a
+    // deadline-based one notices the deadline is already past on
+    // whatever tick does fire.
+    render(<PomodoroTimer taskId="task-1" durationsSeconds={durationsSeconds} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /start focus session/i }));
+
+    // Jump the clock 10s ahead (far past the 2s work interval) without
+    // letting fake timers "catch up" via repeated callback firings —
+    // then let exactly one 1s tick fire.
+    vi.setSystemTime(Date.now() + 10_000);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+    expect(screen.queryByText(/Short break:/)).not.toBeNull();
+    expect(recordSessionAction).toHaveBeenCalledTimes(1);
+  });
 });

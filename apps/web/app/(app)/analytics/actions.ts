@@ -1,6 +1,6 @@
 "use server";
 
-import { apiFetch } from "@/lib/api-client";
+import { apiFetch, type ApiResult } from "@/lib/api-client";
 import { auth } from "@/lib/auth";
 
 export interface FocusTimeByDay {
@@ -19,18 +19,15 @@ export interface FocusTimeResponse {
   by_task: FocusTimeByTask[];
 }
 
-const EMPTY: FocusTimeResponse = { by_day: [], by_task: [] };
-
 // AC16: the user id sent to apps/api comes only from the validated
-// session read here.
-export async function getFocusTime(): Promise<FocusTimeResponse> {
+// session read here. Returns the typed result (not a bare fallback) so
+// the page can tell a genuinely empty response apart from a failed
+// fetch (AC9) instead of showing the empty-state copy for both.
+export async function getFocusTime(): Promise<ApiResult<FocusTimeResponse>> {
   const session = await auth();
   if (!session?.user?.id) {
-    return EMPTY;
+    return { ok: false, error: "You must be logged in." };
   }
 
-  const result = await apiFetch<FocusTimeResponse>("/analytics/focus-time", {
-    userId: session.user.id,
-  });
-  return result.ok ? result.data : EMPTY;
+  return apiFetch<FocusTimeResponse>("/analytics/focus-time", { userId: session.user.id });
 }

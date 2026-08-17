@@ -69,12 +69,15 @@ async def focus_time(
         for offset in range(days)
     ]
 
+    # by_task is all-time, unlike by_day's `days` window — AC9's empty
+    # state is defined by "no recorded sessions" ever, and AC8 only
+    # scopes the *chart* to the last 7 days, not the per-task list.
     task_result = await db.execute(
         select(
             Task.id, Task.title, func.sum(PomodoroSession.duration_seconds).label("total")
         )
         .join(PomodoroSession, PomodoroSession.task_id == Task.id)
-        .where(Task.user_id == user_id, PomodoroSession.started_at >= window_start)
+        .where(Task.user_id == user_id)
         .group_by(Task.id, Task.title)
     )
     by_task = [

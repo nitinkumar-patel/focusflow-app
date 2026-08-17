@@ -51,9 +51,12 @@ conforms to.
 
 ## Conventions you'll see across packages
 
-- Every app has its own `AGENTS.md` describing app-specific rules once
-  real code lands (package-level conventions, not yet needed while the
-  skeleton is being built).
+- Each app may carry its own `AGENTS.md` for package-specific
+  conventions. `apps/web/AGENTS.md` currently holds only the
+  Next.js-generated block (see the file); `apps/api/` has none yet —
+  add real package-level conventions to either as they emerge, rather
+  than duplicating what `AGENTS.md` (repo root), `reference.md`, and
+  `docs/specs/walking-skeleton/plan.md` already state.
 - The browser never calls `apps/api/` directly — every API call is
   proxied through a `apps/web/` Server Action or Route Handler.
 - Every schema change to `apps/api/` ships with an Alembic migration in

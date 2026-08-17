@@ -460,6 +460,11 @@ burst probe against the running Nginx (T14).
   partial-session credit by design — see spec Boundaries), and on
   reload the timer resets to idle. Acceptable for the walking skeleton;
   resuming an in-flight interval is out of scope.
+- Navigating from `/tasks` to `/analytics` (or anywhere else) mid-run has
+  the same effect as a refresh: the client-side navigation unmounts
+  `PomodoroTimer`, clearing its interval with nothing recorded. Same
+  acceptable-loss reasoning as the line above — not a separate gap
+  (round-1 REVIEW finding).
 - `require_internal_secret` rejects (401) when `INTERNAL_API_SECRET` is
   unset or empty on either side — an empty-to-empty comparison must not
   silently authorize (T4 test). Both apps refuse to **start** at all on
@@ -496,6 +501,13 @@ SCA action per ecosystem, a container-scan action (e.g. `trivy`) — these
 never ship to a deployed instance. No `testcontainers` (see Design
 decisions above — the existing `db` Compose service is reused for tests
 instead).
+
+**EXECUTE-time addendum (T4):** `pydantic[email]` (the `email` extras
+variant of the already-ADR-0001-named `pydantic`, pulling in
+`email-validator` + `dnspython`) replaced the bare `pydantic` runtime
+dependency — `EmailStr` needs the extras package installed, discovered
+via a container crash on `RegisterRequest`'s `email: EmailStr` field.
+Recorded here per spec Boundaries § Ask first, round-1 REVIEW finding.
 
 ## Tasks
 

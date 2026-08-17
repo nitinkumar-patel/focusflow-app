@@ -25,7 +25,14 @@ services:
   web:
     build:
       context: ./apps/web
-    env_file: .env
+    # Explicit list (not env_file: .env) so web never receives
+    # POSTGRES_* secrets it has no use for — compose reads .env
+    # automatically for the ${...} substitutions below.
+    environment:
+      AUTH_SECRET: ${AUTH_SECRET}
+      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET}
+      API_BASE_URL: ${API_BASE_URL}
+      POMODORO_TEST_SHORT_INTERVALS: ${POMODORO_TEST_SHORT_INTERVALS:-}
     depends_on:
       - api
 

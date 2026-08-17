@@ -120,12 +120,14 @@ async def record_session(
 
     recent_cutoff = now - timedelta(seconds=RAPID_DUPLICATE_WINDOW_SECONDS)
     recent_result = await db.execute(
-        select(PomodoroSession).where(
+        select(PomodoroSession)
+        .where(
             PomodoroSession.task_id == task_id,
             PomodoroSession.ended_at >= recent_cutoff,
         )
+        .limit(1)
     )
-    if recent_result.scalar_one_or_none() is not None:
+    if recent_result.scalars().first() is not None:
         raise HTTPException(
             status_code=422, detail="a session for this task was just recorded"
         )

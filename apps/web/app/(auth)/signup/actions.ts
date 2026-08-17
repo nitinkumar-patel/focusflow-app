@@ -28,6 +28,16 @@ export async function signUpAction(
     return { error: "Email and password are required." };
   }
 
+  // Defense in depth (spec Boundaries § Always do) — the browser's
+  // type="email" and minLength/maxLength attributes only constrain a
+  // browser-driven request, not a direct POST to this action.
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return { error: "Enter a valid email address." };
+  }
+  if (password.length < 8 || password.length > 128) {
+    return { error: "Password must be between 8 and 128 characters." };
+  }
+
   const result = await apiFetch<RegisterResponse>("/auth/register", {
     method: "POST",
     body: { email, password },

@@ -74,6 +74,29 @@ async def test_by_task_sums_seeded_sessions(client: AsyncClient) -> None:
     assert body["by_task"][0]["minutes"] == 25.0
 
 
+async def test_by_task_is_not_windowed_by_days(client: AsyncClient) -> None:
+    # by_task is all-time, unlike by_day's `days` window — AC9's empty
+    # state is defined by "no recorded sessions" ever, not "none in the
+    # last N days" (Design decisions / round-1 REVIEW finding).
+    user_id = await _register_user(client, "analytics-old-session@example.com")
+    task_id = await _create_task(client, user_id, "Old task")
+
+    old_start = datetime.now(UTC) - timedelta(days=30)
+    await _record_session(client, user_id, task_id, old_start, 1500)
+
+    response = await client.get(
+        "/analytics/focus-time", params={"days": 7}, headers=_headers(user_id)
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["by_task"]) == 1
+    assert body["by_task"][0]["task_title"] == "Old task"
+    assert body["by_task"][0]["minutes"] == 25.0
+    # The old session falls outside the 7-day by_day window, so every
+    # bucket stays zero even though by_task reports it.
+    assert all(bucket["minutes"] == 0 for bucket in body["by_day"])
+
+
 async def test_by_day_is_zero_filled_to_days_param(client: AsyncClient) -> None:
     user_id = await _register_user(client, "analytics-zero-fill@example.com")
     task_id = await _create_task(client, user_id, "Task")

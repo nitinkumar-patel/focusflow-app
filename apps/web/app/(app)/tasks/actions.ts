@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 
-import { apiFetch } from "@/lib/api-client";
+import { apiFetch, type ApiResult } from "@/lib/api-client";
 import { auth } from "@/lib/auth";
 
 export interface Task {
@@ -13,14 +13,16 @@ export interface Task {
 
 // AC16: the user id sent to apps/api comes only from the validated
 // session read here — never from a function parameter or form field.
-export async function getTasks(): Promise<Task[]> {
+// Returns the typed result (not a bare array) so the page can tell a
+// genuinely empty task list apart from a failed fetch (AC3) instead of
+// showing the empty-state copy for both.
+export async function getTasks(): Promise<ApiResult<Task[]>> {
   const session = await auth();
   if (!session?.user?.id) {
-    return [];
+    return { ok: false, error: "You must be logged in." };
   }
 
-  const result = await apiFetch<Task[]>("/tasks", { userId: session.user.id });
-  return result.ok ? result.data : [];
+  return apiFetch<Task[]>("/tasks", { userId: session.user.id });
 }
 
 export interface CreateTaskFormState {
@@ -36,9 +38,15 @@ export async function createTaskAction(
     return { error: "You must be logged in." };
   }
 
-  const title = formData.get("title");
-  if (typeof title !== "string" || !title.trim()) {
+  const rawTitle = formData.get("title");
+  if (typeof rawTitle !== "string") {
     return { error: "Task title is required." };
+  }
+  // Defense in depth (spec Boundaries § Always do) — the HTML
+  // maxLength attribute only constrains a browser-driven request.
+  const title = rawTitle.trim();
+  if (title.length < 1 || title.length > 200) {
+    return { error: "Task title must be between 1 and 200 characters." };
   }
 
   const result = await apiFetch<Task>("/tasks", {

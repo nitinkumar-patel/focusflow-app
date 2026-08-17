@@ -53,7 +53,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build ${{ matrix.service }} image
-        run: docker build -t focusflow-${{ matrix.service }}:ci apps/${{ matrix.service }}
+        # api's docker-compose.yml build target is "dev" (AGENTS.md: the
+        # same image `docker compose exec api pytest`/`ruff` run
+        # against), not the default last-stage "runtime" a plain
+        # `docker build` would pick — scan the image that actually ships.
+        run: |
+          if [ "${{ matrix.service }}" = "api" ]; then
+            docker build --target dev -t focusflow-${{ matrix.service }}:ci apps/${{ matrix.service }}
+          else
+            docker build -t focusflow-${{ matrix.service }}:ci apps/${{ matrix.service }}
+          fi
       - name: Trivy scan
         uses: aquasecurity/trivy-action@0.24.0
         with:

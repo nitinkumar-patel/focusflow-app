@@ -92,10 +92,13 @@
   (validation, not-found, unauthorized). Next.js: Server Actions catch
   FastAPI error responses and return a typed `{ok: false, error}` result
   to the calling component — no uncaught rejections reaching the UI.
-- **Observability.** FastAPI logs structured JSON to stdout (captured by
-  `docker compose logs`); each request log includes method, path, status,
-  and duration. No external log aggregator for the MVP — `docker compose
-  logs -f api` is the read-ground-truth command until that changes.
+- **Observability.** FastAPI logs uvicorn's default access-log format
+  (method, path, status — no duration, no structured JSON yet) to
+  stdout, captured by `docker compose logs`. No external log aggregator
+  for the MVP — `docker compose logs -f api` is the read-ground-truth
+  command. Structured JSON access logging is a known gap, not yet
+  warranted at this scale — revisit if/when log volume or an external
+  aggregator makes plaintext logs unworkable.
 - **Security & data handling.** Authn via NextAuth JWT session
   (browser-facing) + internal shared secret (`INTERNAL_API_SECRET`,
   server-only env var) between Next.js and FastAPI. Passwords hashed with
