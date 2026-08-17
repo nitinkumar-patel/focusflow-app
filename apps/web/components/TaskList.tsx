@@ -1,8 +1,15 @@
 import type { Task } from "@/app/(app)/tasks/actions";
+import type { DurationsSeconds } from "@/lib/pomodoro-durations";
 
-// Per-task "Start focus session" control lands in T12 — a contextual
-// row action, not a second primary action (AC13).
-export function TaskList({ tasks }: { tasks: Task[] }) {
+import { PomodoroTimer } from "./PomodoroTimer";
+
+export function TaskList({
+  tasks,
+  durationsSeconds,
+}: {
+  tasks: Task[];
+  durationsSeconds: DurationsSeconds;
+}) {
   if (tasks.length === 0) {
     return <p>You don&apos;t have any tasks yet. Add one above to start tracking focus time.</p>;
   }
@@ -10,7 +17,10 @@ export function TaskList({ tasks }: { tasks: Task[] }) {
   return (
     <ul>
       {tasks.map((task) => (
-        <li key={task.id}>{task.title}</li>
+        <li key={task.id}>
+          {task.title}{" "}
+          <PomodoroTimer taskId={task.id} durationsSeconds={durationsSeconds} />
+        </li>
       ))}
     </ul>
   );

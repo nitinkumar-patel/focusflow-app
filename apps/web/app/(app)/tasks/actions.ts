@@ -54,3 +54,46 @@ export async function createTaskAction(
   revalidatePath("/tasks");
   return {};
 }
+
+export interface PomodoroSession {
+  id: string;
+  task_id: string;
+  started_at: string;
+  ended_at: string;
+  duration_seconds: number;
+}
+
+export interface RecordSessionResult {
+  ok: boolean;
+  error?: string;
+}
+
+// Called by PomodoroTimer when a work interval finishes naturally — see
+// AC6/AC7 (never called for a break, never called on early stop).
+export async function recordSessionAction(
+  taskId: string,
+  startedAt: string,
+  endedAt: string,
+  durationSeconds: number,
+): Promise<RecordSessionResult> {
+  const session = await auth();
+  if (!session?.user?.id) {
+    return { ok: false, error: "You must be logged in." };
+  }
+
+  const result = await apiFetch<PomodoroSession>(`/tasks/${taskId}/sessions`, {
+    method: "POST",
+    userId: session.user.id,
+    body: { started_at: startedAt, ended_at: endedAt, duration_seconds: durationSeconds },
+  });
+
+  if (!result.ok) {
+    return { ok: false, error: result.error };
+  }
+
+  // The timer lives on /tasks; the chart lives on /analytics — a
+  // completed session changes what both would show.
+  revalidatePath("/tasks");
+  revalidatePath("/analytics");
+  return { ok: true };
+}
