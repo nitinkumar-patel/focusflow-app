@@ -1,0 +1,145 @@
+import logging
+from unittest.mock import patch
+
+import pytest
+from httpx import AsyncClient
+
+from app.core.config import settings
+
+HEADERS = {"X-Internal-Secret": settings.internal_api_secret}
+
+
+async def test_register_creates_user(client: AsyncClient) -> None:
+    response = await client.post(
+        "/auth/register",
+        json={"email": "alice@example.com", "password": "correct horse battery staple"},
+        headers=HEADERS,
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["email"] == "alice@example.com"
+    assert "id" in body
+    assert "password" not in body
+    assert "password_hash" not in body
+
+
+async def test_register_duplicate_email_409(client: AsyncClient) -> None:
+    payload = {"email": "bob@example.com", "password": "correct horse battery staple"}
+    first = await client.post("/auth/register", json=payload, headers=HEADERS)
+    assert first.status_code == 201
+    second = await client.post("/auth/register", json=payload, headers=HEADERS)
+    assert second.status_code == 409
+
+
+async def test_register_short_password_422_body_has_no_input_echo(client: AsyncClient) -> None:
+    response = await client.post(
+        "/auth/register",
+        json={"email": "carol@example.com", "password": "short1"},
+        headers=HEADERS,
+    )
+    assert response.status_code == 422
+    raw = response.text
+    assert "short1" not in raw
+    assert '"input"' not in raw
+    assert isinstance(response.json()["detail"], str)
+
+
+async def test_register_over_max_password_422(client: AsyncClient) -> None:
+    response = await client.post(
+        "/auth/register",
+        json={"email": "dave@example.com", "password": "x" * 129},
+        headers=HEADERS,
+    )
+    assert response.status_code == 422
+
+
+async def test_verify_correct_password_200(client: AsyncClient) -> None:
+    payload = {"email": "erin@example.com", "password": "correct horse battery staple"}
+    await client.post("/auth/register", json=payload, headers=HEADERS)
+    response = await client.post("/auth/verify", json=payload, headers=HEADERS)
+    assert response.status_code == 200
+    assert response.json()["email"] == "erin@example.com"
+
+
+async def test_verify_wrong_password_401(client: AsyncClient) -> None:
+    payload = {"email": "frank@example.com", "password": "correct horse battery staple"}
+    await client.post("/auth/register", json=payload, headers=HEADERS)
+    response = await client.post(
+        "/auth/verify",
+        json={"email": "frank@example.com", "password": "wrong password"},
+        headers=HEADERS,
+    )
+    assert response.status_code == 401
+
+
+async def test_verify_unknown_email_still_calls_verify_password(client: AsyncClient) -> None:
+    with patch("app.auth.router.verify_password", return_value=False) as mock_verify:
+        response = await client.post(
+            "/auth/verify",
+            json={"email": "nobody@example.com", "password": "anything"},
+            headers=HEADERS,
+        )
+    assert response.status_code == 401
+    mock_verify.assert_called_once()
+
+
+async def test_missing_internal_secret_401(client: AsyncClient) -> None:
+    response = await client.post(
+        "/auth/register",
+        json={"email": "grace@example.com", "password": "correct horse battery staple"},
+    )
+    assert response.status_code == 401
+
+
+async def test_empty_internal_secret_rejected(client: AsyncClient) -> None:
+    response = await client.post(
+        "/auth/register",
+        json={"email": "heidi@example.com", "password": "correct horse battery staple"},
+        headers={"X-Internal-Secret": ""},
+    )
+    assert response.status_code == 401
+
+
+async def test_no_password_in_logs_or_responses(
+    client: AsyncClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+
+    password = "correct horse battery staple-unique-marker"
+    responses_text = []
+
+    r1 = await client.post(
+        "/auth/register",
+        json={"email": "ivan@example.com", "password": password},
+        headers=HEADERS,
+    )
+    responses_text.append(r1.text)
+
+    r2 = await client.post(
+        "/auth/register",
+        json={"email": "ivan@example.com", "password": password},
+        headers=HEADERS,
+    )
+    responses_text.append(r2.text)
+
+    r3 = await client.post(
+        "/auth/verify",
+        json={"email": "ivan@example.com", "password": password},
+        headers=HEADERS,
+    )
+    responses_text.append(r3.text)
+
+    r4 = await client.post(
+        "/auth/register",
+        json={"email": "judy@example.com", "password": "short"},
+        headers=HEADERS,
+    )
+    responses_text.append(r4.text)
+
+    for text in responses_text:
+        assert password not in text
+        assert "$argon2" not in text
+
+    log_text = caplog.text
+    assert password not in log_text
+    assert "$argon2" not in log_text

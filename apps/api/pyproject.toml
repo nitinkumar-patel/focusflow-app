@@ -10,7 +10,7 @@ dependencies = [
     "asyncpg>=0.30",
     "alembic>=1.14",
     "argon2-cffi>=23.1",
-    "pydantic>=2.9",
+    "pydantic[email]>=2.9",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +37,10 @@ extend-exclude = ["migrations/versions"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+# B008: FastAPI's dependency-injection pattern requires `Depends(...)`
+# as an argument default — that's not an accidental function call, it's
+# the framework's documented API. Recurs on every route handler.
+ignore = ["B008"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -45,5 +49,11 @@ asyncio_mode = "auto"
 # function-scoped loop (pytest-asyncio's default) closes that loop after
 # every test and the pool then fails on the next test with "Event loop
 # is closed". Session-scoping the loop matches the engine's lifetime.
+# Both settings are required: the *fixture* loop scope alone leaves
+# tests themselves on a per-function loop, which is a cross-loop
+# mismatch against session-scoped fixtures (asyncpg connections opened
+# under one loop, torn down under another) — same failure, easy to
+# half-fix by setting only one of the two.
 asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]

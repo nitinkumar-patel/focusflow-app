@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.auth.router import router as auth_router
 from app.core.config import settings
 from app.db.session import check_db_connection
 
@@ -40,6 +41,8 @@ async def healthz() -> JSONResponse:
     return JSONResponse(status_code=503, content={"detail": "database unreachable"})
 
 
-# Routers are added directly here as each lands (T4 auth, T5/T7 tasks,
-# T8 analytics) — no defensive import-swallowing, since a real import
+app.include_router(auth_router)
+
+# More routers land here as each task completes (T5/T7 tasks, T8
+# analytics) — no defensive import-swallowing, since a real import
 # error in a router module should fail loudly, not be masked.

@@ -16,6 +16,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
 from app.db.base import Base
@@ -23,7 +24,13 @@ from app.db.session import get_db_session
 
 _API_ROOT = Path(__file__).resolve().parent.parent
 
-test_engine = create_async_engine(settings.database_url_test, pool_pre_ping=True)
+# NullPool: a fresh connection per checkout, closed immediately on
+# return — no pooled connection is ever reused across a test/event-loop
+# boundary. Pooling efficiency doesn't matter for a short-lived test
+# run, and pooled async connections are the direct cause of the
+# "attached to a different loop" / GC-finalizer corruption that shows up
+# otherwise (a well-documented SQLAlchemy-async + pytest-asyncio trap).
+test_engine = create_async_engine(settings.database_url_test, poolclass=NullPool)
 test_session_factory = async_sessionmaker(test_engine, expire_on_commit=False)
 
 
@@ -61,6 +68,16 @@ def _provision_test_database() -> None:
 
     asyncio.run(_ensure_test_database_exists())
     _run_migrations_against_test_db()
+
+
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def _dispose_test_engine_at_session_end() -> AsyncGenerator[None]:
+    # Explicit disposal before the session-scoped loop closes — without
+    # this, a connection that wasn't returned to the pool in time gets
+    # picked up by GC's finalizer *after* the loop has already closed,
+    # raising "Event loop is closed" at collection.
+    yield
+    await test_engine.dispose()
 
 
 @pytest_asyncio.fixture(autouse=True)
