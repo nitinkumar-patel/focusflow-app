@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.analytics.router import router as analytics_router
 from app.auth.router import router as auth_router
 from app.core.config import settings
 from app.db.session import check_db_connection
@@ -44,7 +45,4 @@ async def healthz() -> JSONResponse:
 
 app.include_router(auth_router)
 app.include_router(tasks_router)
-
-# T8's analytics router lands here next — no defensive
-# import-swallowing, since a real import error in a router module
-# should fail loudly, not be masked.
+app.include_router(analytics_router)
