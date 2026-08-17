@@ -772,12 +772,17 @@ journey in T14, not a unit test of NextAuth internals). AC2, AC11
 (secret half), AC12, AC18 (session config half).
 
 **Approach:**
-- Resolve the framework-currency note (Approach): confirm NextAuth v5's
-  Credentials-provider API shape, secret env var name, and reverse-proxy
-  (`trustHost`) configuration, and whether this repo's Next.js version
-  uses `middleware.ts` or `proxy.ts` for route interception, against
-  live docs. Update `.env.example`'s NextAuth-related var name from T1
-  if it was a placeholder.
+- Framework-currency note resolved by reading the installed packages'
+  own type definitions and Next.js's bundled docs (`node_modules/next/dist/docs`,
+  `node_modules/@auth/core/*.d.ts`) rather than trained-in knowledge:
+  (1) NextAuth v5 (`next-auth@beta`, `5.0.0-beta.32`) infers its secret
+  from `AUTH_SECRET` (primary) or the legacy `NEXTAUTH_SECRET` alias —
+  `.env.example` and `check-secrets.mjs` use `AUTH_SECRET`; (2)
+  self-hosted behind our own Nginx isn't an auto-trusted platform, so
+  `trustHost: true` is set explicitly in `NextAuth({...})`; (3) Next.js
+  16 confirmed the route-interception file is `proxy.ts` (`middleware.ts`
+  is deprecated), exporting a default function plus an optional
+  `config.matcher`.
 - `apps/web/lib/api-client.ts`: typed `fetch` wrapper (attaches
   `X-Internal-Secret` / `X-User-Id`, normalizes errors); never logs or
   includes in a thrown error the raw request body of any call that
@@ -787,8 +792,8 @@ journey in T14, not a unit test of NextAuth internals). AC2, AC11
   `authorize()` calls `POST /auth/verify` via the API client; error path
   never logs or rethrows the raw password it received; JWT session
   strategy with `maxAge` set to 7 days (Design decisions, AC18).
-- The resolved route-interception file: redirect unauthenticated
-  requests to `/tasks`, `/analytics` toward `/login` (AC12).
+- `apps/web/proxy.ts`: redirect unauthenticated requests to `/tasks`,
+  `/analytics` toward `/login` (AC12).
 - `apps/web/app/(app)/layout.tsx`: shared authenticated shell — nav
   ("Tasks" / "Analytics" links) plus `LogoutButton` (calls `signOut()`,
   AC18).

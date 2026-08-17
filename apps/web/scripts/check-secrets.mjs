@@ -1,7 +1,7 @@
 // Fail closed before the Next.js server ever binds — see spec AC19.
-// NEXTAUTH_SECRET is the working name pending T9's framework-currency
-// check against current NextAuth v5 docs (may become AUTH_SECRET).
-const required = ["INTERNAL_API_SECRET", "NEXTAUTH_SECRET"];
+// AUTH_SECRET confirmed as NextAuth v5's primary secret var name
+// against the installed package's own type definitions (T9).
+const required = ["INTERNAL_API_SECRET", "AUTH_SECRET"];
 const missing = required.filter((name) => !process.env[name]);
 
 if (missing.length > 0) {
