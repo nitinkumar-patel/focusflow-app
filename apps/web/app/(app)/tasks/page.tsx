@@ -19,7 +19,7 @@ export default async function TasksPage() {
       {result.ok ? (
         <TaskList tasks={result.data} durationsSeconds={durationsSeconds} />
       ) : (
-        <p role="alert">Couldn&apos;t reach the server, try again.</p>
+        <p role="alert">{result.error}</p>
       )}
     </div>
   );

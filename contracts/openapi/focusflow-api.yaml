@@ -307,7 +307,11 @@ paths:
             (including today), zero-filled for days with no sessions. Day
             boundaries are computed in UTC from each session's started_at;
             this is a simplification for the walking skeleton, not a
-            viewer-local-timezone bucketing.
+            viewer-local-timezone bucketing. by_task is all-time — the
+            `days` window applies only to by_day, so a caller with only
+            older sessions still gets a non-empty by_task (this is what
+            distinguishes "no sessions in the window" from "no sessions
+            ever" for the UI's empty-state decision).
           content:
             application/json:
               schema:

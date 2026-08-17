@@ -114,4 +114,23 @@ describe("PomodoroTimer", () => {
     expect(screen.queryByText(/Short break:/)).not.toBeNull();
     expect(recordSessionAction).toHaveBeenCalledTimes(1);
   });
+
+  it("shows an inline error when recordSessionAction fails, without losing the interval transition", async () => {
+    vi.mocked(recordSessionAction).mockResolvedValueOnce({
+      ok: false,
+      error: "duplicate session",
+    });
+    render(<PomodoroTimer taskId="task-1" durationsSeconds={durationsSeconds} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /start focus session/i }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+
+    // The timer still advances to the break even though recording
+    // failed — a network error shouldn't freeze the UI (round-2 REVIEW
+    // finding: this branch, added for round-1 Concern #7, had no test).
+    expect(screen.queryByText(/Short break:/)).not.toBeNull();
+    expect(screen.getByRole("alert").textContent).toContain("duplicate session");
+  });
 });

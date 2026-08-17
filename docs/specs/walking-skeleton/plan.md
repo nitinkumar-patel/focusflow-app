@@ -299,7 +299,13 @@ burst probe against the running Nginx (T14).
   the 409 in `contracts/openapi/focusflow-api.yaml`. Every query that
   reads `tasks` or `pomodoro_sessions` filters by the caller's `user_id`
   (via the `tasks.user_id` join for sessions) — this is what AC14 holds
-  the implementation to.
+  the implementation to. Indexes on `tasks.user_id` and
+  `pomodoro_sessions.task_id` back every one of those filters/joins
+  (round-2 REVIEW finding) — added by amending T2's still-unreleased
+  initial migration directly rather than a follow-up one; any Postgres
+  volume created before this fix landed needs `docker compose down -v`
+  before the next `docker compose up`, since `alembic upgrade head` is a
+  no-op once a revision id is already stamped.
 
 ### Interfaces & contracts
 
@@ -441,6 +447,12 @@ burst probe against the running Nginx (T14).
   never an f-string or `%`-formatted query string, even for the
   date-bucketing expression (the one place in this spec's SQL surface
   where hand-building a fragment might otherwise be tempting).
+- `by_task` is all-time — the `days` window applies only to `by_day`
+  (round-2 REVIEW finding). AC9's empty state means "no recorded
+  sessions ever", so the empty-state decision in
+  `apps/web/app/(app)/analytics/page.tsx` keys off `by_task`, not
+  `by_day`; windowing `by_task` too would incorrectly show the
+  empty-state for a user whose only sessions predate the window.
 - `POST /auth/register`'s 409-on-duplicate-email is a deliberate,
   accepted account-enumeration disclosure for this spec's plain-auth
   scope (see spec Assumptions); `/auth/verify`'s response time is *not*
@@ -561,7 +573,12 @@ Recorded here per spec Boundaries § Ask first, round-1 REVIEW finding.
   `/signup`, `/login`, `/api/auth/`, and `/healthz` (Design decisions).
 - `.env.example` at repo root, **every secret shipped empty**
   (`INTERNAL_API_SECRET=`, the NextAuth secret var `=`) with a comment
-  pointing at `openssl rand -hex 32`; also `POSTGRES_*`, `DATABASE_URL`,
+  pointing at `openssl rand -hex 32`; also `POSTGRES_*` (no combined
+  `DATABASE_URL` var — `env_file:` doesn't support `${VAR}`
+  interpolation, so `apps/api/app/core/config.py` builds
+  `database_url` from the separate `POSTGRES_*` parts instead —
+  round-2 REVIEW correction, this line previously listed a
+  `DATABASE_URL` var that was never actually shipped),
   `API_BASE_URL` (the internal `http://api:8000` address `api-client.ts`
   targets), `POMODORO_TEST_SHORT_INTERVALS=` (also empty by default).
   `.env`, `.env.*` (with `!.env.example`), `node_modules/`, and `.next/`
@@ -1000,8 +1017,13 @@ AC21-verification note).
   immediately if the forwarded-header config is wrong (Design
   decisions); separately, confirm an unauthenticated request to
   `/tasks` redirects to `/login` (AC12); `! grep -rn 'allowedOrigins'
-  apps/web/lib/auth.ts | grep -q '\*'` confirms no wildcard
-  allowed-origins workaround was added (AC21); capture `docker compose
+  apps/web/next.config.ts apps/web/lib/auth.ts | grep -q '\*'` confirms
+  no wildcard allowed-origins workaround was added (AC21) — **EXECUTE-time
+  correction (round-2 REVIEW finding)**: the original version scanned only
+  `lib/auth.ts`, where Next.js's `allowedOrigins` setting
+  (`experimental.serverActions.allowedOrigins` in `next.config.ts`) can
+  never appear, making the check vacuously pass regardless of whether a
+  wildcard was ever added; capture `docker compose
   logs web api` and grep it for the test password and both secrets as
   the running-artifact half of AC11; run a scripted burst of requests at
   `/login` and confirm a 429 appears once the configured threshold is
@@ -1267,3 +1289,41 @@ noted honestly per Design decisions, not claimed as tested).
   Server Action form-submission path a real signup/login uses (as
   T10/T11's verification confirmed) — the T9 anomaly was an artifact of
   bypassing the real code path, not a live bug.
+- 2026-08-17: revised after implementation-mode adversarial review round
+  1 (5 Blockers, 8 Concerns, 6 Nits), run once all 16 tasks were built
+  and verified against the live Compose stack. Fixed a real bug —
+  `PomodoroTimer` counted `setInterval` ticks instead of tracking an
+  absolute deadline, so a throttled background tab would silently
+  under-run a work interval while still recording it as a full 25
+  minutes. Also: `getTasks()`/`getFocusTime()` no longer collapse a
+  failed fetch into an empty result (both render an explicit error
+  state now); `signUpAction`/`createTaskAction` re-validate
+  password/title server-side; `by_task` in `GET /analytics/focus-time`
+  is no longer windowed by `days` (see Behavior & rules); the logout
+  action moved out of an inline component prop into
+  `app/(app)/actions.ts` so AC16's grep check stays exhaustive; two
+  `scalar_one_or_none()` calls on non-unique-safe queries were fixed to
+  avoid a 500 under concurrent requests; CI's container scan now builds
+  `apps/api` with `--target dev`, matching what `docker-compose.yml`
+  deploys; added indexes on `tasks.user_id` and
+  `pomodoro_sessions.task_id` (see Data & schema); recorded the
+  `pydantic[email]` dependency addition (see Dependencies &
+  integration). `docs/specs/walking-skeleton/qa-log.md` now carries a
+  persisted transcript of a clean-volume T14 run and the T15
+  clean-clone check.
+- 2026-08-17: revised after implementation-mode adversarial review round
+  2 (3 Blockers, 5 Concerns, 9 Nits) — findings against the round-1 fix
+  commit itself. The most notable: AC21's wildcard-`allowedOrigins`
+  check scanned `apps/web/lib/auth.ts`, where that Next.js Server
+  Actions setting can never appear (it's a `next.config.ts` option) —
+  the check was vacuous, always passing regardless of outcome. Fixed to
+  scan `next.config.ts` too (see the T14 Approach entry above).
+  `recordSessionAction` gained the same server-side re-validation
+  `signUpAction`/`createTaskAction` got in round 1 (taskId shape,
+  parseable timestamps, duration bound) — it's the one mutating action
+  round 1 missed. `logoutAction`'s `await auth()` call was vestigial
+  (discarded the result) — now branches on it for real. `by_task`'s
+  all-time scope is now stated in the OpenAPI contract, not just a code
+  comment. `qa-log.md` gained sections covering the round-1-introduced
+  error states (previously untested) and AC13's primary-action-count
+  observation per screen.

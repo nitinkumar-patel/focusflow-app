@@ -17,7 +17,13 @@ services:
     build:
       context: ./apps/api
       target: dev
-    env_file: .env
+    # Explicit list (not env_file: .env), same reasoning as web below —
+    # api has no use for AUTH_SECRET or POMODORO_TEST_SHORT_INTERVALS.
+    environment:
+      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET}
+      POSTGRES_USER: ${POSTGRES_USER:-focusflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-focusflow}
     depends_on:
       db:
         condition: service_healthy

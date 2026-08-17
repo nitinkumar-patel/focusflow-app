@@ -14,7 +14,10 @@ COPY tests ./tests
 ENTRYPOINT ["./entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
-# runtime: lean, no dev tooling.
+# runtime: lean, no dev tooling. Not currently built by docker-compose.yml
+# or CI (both target `dev`, so `docker compose exec api pytest` has a
+# container to run against) — kept as the eventual lean-production target
+# once this ships somewhere `dev`'s extra tooling shouldn't run.
 FROM base AS runtime
 RUN pip install --no-cache-dir .
 ENTRYPOINT ["./entrypoint.sh"]

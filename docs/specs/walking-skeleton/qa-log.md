@@ -69,8 +69,13 @@ internal port directly, except where noted.
   grepped for the plaintext test password, `INTERNAL_API_SECRET`,
   `AUTH_SECRET`, and `POSTGRES_PASSWORD` values — no match for any.
 - **AC21 (wildcard-origins absence):**
-  `grep -rn 'allowedOrigins' apps/web/lib/auth.ts | grep -q '*'` — no
-  match, confirms no wildcard workaround was added.
+  `! grep -rn 'allowedOrigins' apps/web/next.config.ts apps/web/lib/auth.ts
+  | grep -q '\*'` — passes (round-2 REVIEW fix: the original check
+  scanned only `lib/auth.ts`, where Next.js's `allowedOrigins` setting
+  can never appear since it's a `next.config.ts` option, making the
+  original check vacuous regardless of outcome; re-verified against
+  `apps/web/next.config.ts`, which has no `allowedOrigins` entry at
+  all).
 - **AC17 (rate limiting, whole-stack):** burst of 10 rapid
   `GET /login` requests through Nginx — first 6 returned `200`
   (burst=5 + the base rate), requests 7-10 returned `429`.
@@ -80,6 +85,58 @@ guide's warning covers this — there is no TLS to test, by design, on
 `localhost`); the actual browser countdown UI (covered instead by
 `PomodoroTimer.test.tsx`'s fake-timer tests, since no browser was
 available in this environment — see T12's commit for that discipline).
+
+**Verification-methodology caveat (round-2 REVIEW finding):** every
+check above drove Server Actions via curl replicating the RSC wire
+protocol, not a real browser. This proves the server-side behavior
+(the request succeeds, the database changes, the next response reflects
+it) but cannot distinguish a client-side re-render from a full document
+reload — so AC4's and AC8's "without a manual page refresh" /
+"without a manual page refresh" clauses are verified indirectly (the
+response is an RSC flight payload, per `revalidatePath`, not an HTML
+document) rather than observed directly in a browser.
+
+## Round-1-introduced error states — 2026-08-17
+
+Round-1's Blocker #4 fix made `/tasks` and `/analytics` render an
+explicit error instead of a false empty-state on API failure; this had
+no test or QA record until now (round-2 REVIEW finding #2).
+
+- Signed up a fresh user, then `docker compose stop api`. `GET /tasks`
+  and `GET /analytics` (through Nginx, same session cookie) both
+  rendered `role="alert"` with the real `apiFetch` failure text
+  ("couldn't reach the server, try again") instead of the old
+  false-empty-state copy. `docker compose start api` restored the
+  stack afterward.
+- `PomodoroTimer`'s equivalent error path (round-1 Concern #7) is
+  covered by a new vitest case
+  (`PomodoroTimer.test.tsx`: "shows an inline error when
+  recordSessionAction fails") rather than a live-stack drive, since
+  forcing a natural work-interval completion to fail requires
+  controlling the API response mid-flight — cleaner as a mocked
+  component test than a race against a real container.
+
+## AC13 primary-action count per screen — 2026-08-17
+
+Previously asserted only by construction (component structure) and
+task-commit prose, never observed (round-2 REVIEW finding #3).
+
+- `/signup` (unauthenticated): one `<button>`, "Sign up".
+- `/login` (unauthenticated): one `<button>`, "Log in".
+- `/tasks` (idle, zero tasks): "Log out" (layout chrome, excluded per
+  plan.md) + "Add task" — one primary action.
+- `/tasks` (idle, one task): adds "Start focus session" as a per-row
+  contextual control — plan.md's AC13 restatement ("at most one primary
+  action, contextual per-row actions don't count") holds; "Add task"
+  remains the sole primary action.
+- `/tasks` mid-run (per-row "Stop" replacing "Start focus session"):
+  not observable via curl — this state only exists client-side after a
+  JS click, with no corresponding server round-trip to inspect. Verified
+  instead by `PomodoroTimer.test.tsx`, which asserts the "Stop" button
+  renders while running and reverts to "Start focus session" on stop —
+  same reasoning as the countdown-UI scope note above.
+- `/analytics`: zero buttons besides "Log out" (layout chrome) —
+  confirms the screen's read-only design (no primary action at all).
 
 All test data (the QA user, its task, and both sessions) was deleted
 from the database after this pass; `POMODORO_TEST_SHORT_INTERVALS` was

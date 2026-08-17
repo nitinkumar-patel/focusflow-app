@@ -185,7 +185,8 @@ spec's design-intent bar.
 - **Nginx forwards the headers Server Actions and NextAuth need, and
   never wildcards allowed-origins** (AC21): goal-based — a curl through
   Nginx asserting the forwarded headers reach `web` (T1), plus a grep of
-  the NextAuth config for a literal `*` in `allowedOrigins`/`trustHost`.
+  `next.config.ts` (Server Actions' `allowedOrigins` option) and the
+  NextAuth config for a literal `*` in `allowedOrigins`/`trustHost`.
 - **A CI workflow runs a secret scanner, SCA for both ecosystems, and a
   container scan** (AC22): goal-based — the workflow file exists,
   declares the three scanner steps, and is structurally valid (this

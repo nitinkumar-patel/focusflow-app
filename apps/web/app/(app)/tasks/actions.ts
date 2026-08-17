@@ -76,6 +76,11 @@ export interface RecordSessionResult {
   error?: string;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Mirrors apps/api's MAX_WORK_INTERVAL_SECONDS (AC5's canonical 25
+// minutes) — independently hardcoded per plan.md's Design decisions.
+const MAX_WORK_INTERVAL_SECONDS = 1500;
+
 // Called by PomodoroTimer when a work interval finishes naturally — see
 // AC6/AC7 (never called for a break, never called on early stop).
 export async function recordSessionAction(
@@ -87,6 +92,20 @@ export async function recordSessionAction(
   const session = await auth();
   if (!session?.user?.id) {
     return { ok: false, error: "You must be logged in." };
+  }
+
+  // Defense in depth (spec Boundaries § Always do) — PomodoroTimer is
+  // client code, so these arguments are as browser-controlled as any
+  // form field, even though this action isn't itself a <form> action.
+  if (
+    !UUID_RE.test(taskId) ||
+    Number.isNaN(Date.parse(startedAt)) ||
+    Number.isNaN(Date.parse(endedAt)) ||
+    !Number.isInteger(durationSeconds) ||
+    durationSeconds < 1 ||
+    durationSeconds > MAX_WORK_INTERVAL_SECONDS
+  ) {
+    return { ok: false, error: "Invalid session data." };
   }
 
   const result = await apiFetch<PomodoroSession>(`/tasks/${taskId}/sessions`, {

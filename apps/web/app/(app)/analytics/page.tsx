@@ -10,7 +10,7 @@ export default async function AnalyticsPage() {
     return (
       <div>
         <h1>Analytics</h1>
-        <p role="alert">Couldn&apos;t reach the server, try again.</p>
+        <p role="alert">{result.error}</p>
       </div>
     );
   }
