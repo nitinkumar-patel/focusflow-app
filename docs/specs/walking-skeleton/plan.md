@@ -817,22 +817,25 @@ interpolates `password` or a request-header value finds none (AC11).
 
 **Depends on:** T9
 
-**Tests:** manual QA plus two goal-based checks. AC1, AC2, AC11 (web
-half), AC13, AC15 (root-route half), AC16 (Server Action provenance
-half).
+**Tests:** manual QA plus one goal-based check. AC1, AC2, AC11 (web
+half), AC13, AC15 (root-route half).
 - Goal-based: `! grep -rnE 'console\.[a-z]+\([^)]*password|\$\{[^}]*password' "apps/web/app/(auth)" apps/web/components apps/web/lib`
   (no match — round-5 fix: widened from just `app/(auth)` to also cover
   `components/` and `lib/`, since `SignUpForm`/`LoginForm` live in
   `components/` per the decomposition and the password actually passes
   through `lib/api-client.ts` and `lib/auth.ts`) — the concrete AC11
   web-half check.
-- Goal-based: `test -z "$(grep -rL 'await auth()' apps/web/app --include='actions.ts')"`
-  (round-5 fix: `grep -L` alone exits 1 on "no non-matching files found,"
-  which is the *pass* case — inverted from what a shell `&&`/exit-code
-  check expects; wrapping in `test -z "$(...)"` makes empty output the
-  pass condition regardless of grep's own exit code) — the concrete AC16
-  check that every `actions.ts` file (the Server Action convention,
-  Component decomposition) reads the session.
+- **AC16 does not apply to this task** (EXECUTE-time correction): T10's
+  `actions.ts` files (`app/(auth)/signup`, `app/(auth)/login`) are
+  pre-auth — there is no session yet to check, since these actions are
+  what *establish* one. AC16 governs Server Actions that read or mutate
+  an *existing* user's data; signup/login create or authenticate an
+  account, which isn't that. The round-5 fix's `grep -rL 'await auth()'
+  apps/web/app --include='actions.ts'` check was too broad — run
+  repo-wide it would incorrectly fail on these two files. T11 introduces
+  the corrected, properly-scoped version of this check
+  (`apps/web/app/(app)/**/actions.ts` only, where AC16 actually
+  applies) once a real user-data-touching action exists to check.
 
 **Approach:**
 - `apps/web/app/(auth)/signup/page.tsx` + `SignUpForm` component,
@@ -859,9 +862,18 @@ half — the rest of AC15 is T15's clean-clone pass).
 
 **Depends on:** T5, T9
 
-**Tests:** no stub (manual QA). AC2 (interaction completion), AC3, AC4,
-AC13, AC16 (Server Action provenance half, continued), AC18 (logout
-interaction half).
+**Tests:** manual QA plus one goal-based check. AC2 (interaction
+completion), AC3, AC4, AC13, AC16, AC18 (logout interaction half).
+- Goal-based: `test -z "$(grep -rL 'await auth()' 'apps/web/app/(app)' --include='actions.ts')"`
+  (corrected scope, EXECUTE-time fix: T10's original version of this
+  check ran repo-wide, which would have incorrectly failed on the
+  pre-auth `app/(auth)/*/actions.ts` files — AC16 only governs Server
+  Actions touching an *existing* user's data, which starts here, not at
+  signup/login. `grep -L` alone exits 1 on "no non-matching files
+  found," the pass case — inverted from a shell `&&`/exit-code check,
+  so `test -z "$(...)"` makes empty output the pass condition regardless
+  of grep's own exit code) — the concrete AC16 check that every
+  `(app)`-scoped `actions.ts` file reads the session.
 
 **Approach:**
 - `apps/web/app/(app)/tasks/page.tsx` (Server Component), `TaskList`,
@@ -885,13 +897,12 @@ list shows the empty-state (AC3); the screen has exactly one primary,
 verb-labelled action control ("Add task") plus per-row contextual
 controls that don't count against that limit (AC13); the `Link` to
 `/analytics` navigates client-side (visible in the browser's Network
-panel as no full document request); `apps/web/app/(app)/tasks/actions.ts`
-contains an `auth()` call before any API-client call (AC16, T10's grep
-check now also covers this file since it matches
-`apps/web/app/**/actions.ts`); clicking "Log out" (rendered by the
-shared `(app)` layout now that a page exists to render it) then
-requesting `/tasks` again redirects to `/login` (AC18, interaction
-half — T9 verified only the `maxAge` config).
+panel as no full document request); the goal-based check above confirms
+`apps/web/app/(app)/tasks/actions.ts` reads the session before any
+API-client call (AC16); clicking "Log out" (rendered by the shared
+`(app)` layout now that a page exists to render it) then requesting
+`/tasks` again redirects to `/login` (AC18, interaction half — T9
+verified only the `maxAge` config).
 
 ### T12: Pomodoro timer UI
 
@@ -1226,3 +1237,21 @@ noted honestly per Design decisions, not claimed as tested).
   security review); remaining risk from here is expected to surface
   through GATES during EXECUTE (a broken shell command fails loudly)
   rather than through further prose review.
+- 2026-08-17: EXECUTE-time fix (T7/T10/T11, wave 5) — this is exactly
+  the "surface through GATES, not more prose review" case the previous
+  entry predicted. T10's AC16 goal-based check (`grep -rL 'await
+  auth()' apps/web/app --include='actions.ts'`, repo-wide) would have
+  incorrectly failed on `app/(auth)/signup/actions.ts` and
+  `app/(auth)/login/actions.ts` — those are pre-auth flows with no
+  session yet to check; AC16 governs Server Actions touching an
+  *existing* user's data. Moved ownership of the check to T11, scoped
+  to `apps/web/app/(app)/**/actions.ts` only, where it's actually
+  meaningful (spec.md's Testing Strategy updated to match). Framework
+  notes from implementing T9-T11 against the real installed packages:
+  NextAuth v5's redirect `Location` header uses the container's own
+  hostname when driven through the raw `/api/auth/callback/credentials`
+  endpoint directly (as T9's curl-based verification did), but resolves
+  correctly to the public host when driven through the actual React
+  Server Action form-submission path a real signup/login uses (as
+  T10/T11's verification confirmed) — the T9 anomaly was an artifact of
+  bypassing the real code path, not a live bug.

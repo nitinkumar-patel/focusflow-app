@@ -165,8 +165,10 @@ spec's design-intent bar.
 - **Unauthenticated visitor redirected to `/login`, and every mutating
   Server Action independently verifies the session** (AC12, AC16):
   visual / manual QA for the redirect (T9/T14); a goal-based grep for
-  the independent-verification rule (T9/T10/T11/T12 — every Server
-  Action that touches user data calls the session check itself).
+  the independent-verification rule, scoped to Server Actions that
+  actually touch an existing user's data (T11/T12/T13 — signup/login's
+  pre-auth actions in T10 are exempt, since they establish a session
+  rather than consuming one).
 - **Exactly one primary action control per screen** (AC13): visual /
   manual QA, exercised per-screen in T10, T11, and T13.
 - **Rate limiting on `/signup`, `/login`, and `/healthz`** (AC17):
