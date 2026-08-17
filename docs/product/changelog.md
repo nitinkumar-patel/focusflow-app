@@ -11,6 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > newest-first. Rewrite entries for users, not contributors — see the
 > [Common Changelog guidance](https://common-changelog.org/).
 
+## [0.1.0] - 2026-08-17
+
+### Added
+
+- **FocusFlow walking skeleton** — the first working slice of FocusFlow, a
+  single-purpose Pomodoro-based focus tracker. Sign up and log in with
+  email/password; create tasks; run a Pomodoro timer (work/short-break/
+  long-break auto-cycle) against a task; see lightweight analytics on
+  focus time, including a per-day chart and per-task totals. Ships as a
+  Dockerized stack (Postgres, FastAPI, Next.js, Nginx) for self-hosting —
+  see `docs/guides/how-to/self-host-with-docker-compose.md`.
+
 ## [core][1.0.0] — 2026-07-31
 
 ### Added
