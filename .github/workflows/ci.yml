@@ -70,14 +70,27 @@ jobs:
       - name: Every mutating Server Action verifies its session (AC16)
         run: |
           test -d 'apps/web/app/(app)'
-          # Derived from "use server", not a fixed filename glob (round-7
-          # REVIEW finding) — an inline "use server" outside actions.ts
-          # would otherwise be invisible to this check.
-          files="$(grep -rl '"use server"' 'apps/web/app/(app)')"
+          # Derived from "use server" (either quote style — round-8
+          # REVIEW fix: a single-quoted directive was invisible to the
+          # round-7 double-quote-only pattern, the same "directive the
+          # check can't see" hole that fix existed to close), not a
+          # fixed filename glob (round-7 REVIEW finding: an inline
+          # "use server" outside actions.ts would otherwise be invisible
+          # to this check).
+          files="$(grep -rlE "['\"]use server['\"]" 'apps/web/app/(app)')"
           test -n "$files"
           fail=0
           while IFS= read -r f; do
-            grep -q 'await auth()' "$f" || { echo "missing await auth(): $f"; fail=1; }
+            # Per-action, not per-file (round-8 REVIEW fix): a file
+            # exporting N actions with only one `await auth()` anywhere
+            # in it used to pass — this requires at least as many
+            # guard calls as exported actions.
+            actions="$(grep -c '^export async function' "$f")"
+            guards="$(grep -c 'await auth()' "$f")"
+            if [ "$guards" -lt "$actions" ]; then
+              echo "fewer await auth() calls ($guards) than exported actions ($actions): $f"
+              fail=1
+            fi
           done <<< "$files"
           exit "$fail"
       - name: No wildcard allowedOrigins/trustHost (AC21)

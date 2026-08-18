@@ -324,4 +324,44 @@ Verified live against a full clean rebuild (`docker compose down` then
   zone's leaky-bucket state carrying across `/signup` and `/login`
   requests in the same test session — expected, not a regression).
 
+## Round 8 (three-way re-review, X-Forwarded-Proto reviewer
+disagreement resolved) — 2026-08-18
+
+Two of three specialist reviewers disputed round 7's X-Forwarded-Proto
+fix (matching the *last* comma-element); adversarial-reviewer
+demonstrated live that `https, http` — a real HTTPS client behind a
+TLS-terminating edge proxy forwarding in plaintext, the guide's own
+recommended topology — produced a non-`Secure` cookie under that
+regex. Independently re-derived the correct semantics (first non-empty
+element) and verified all four disputed cases against the running
+stack, both **before** confirming the bug and **after** applying the
+fix:
+
+| `X-Forwarded-Proto` sent | Before (round 7, last-element) | After (round 8, first-element) |
+|---|---|---|
+| *(absent)* | not Secure | not Secure |
+| `https` | Secure | Secure |
+| `, https` (leading-empty, the original motivating misconfiguration) | Secure | Secure |
+| `http, https` (client used HTTP) | **Secure** ← wrong, browser silently discards | not Secure ✓ |
+| `https, http` (client used HTTPS, plaintext internal hop — the guide's own topology) | **not Secure** ← original Blocker reopened | Secure ✓ |
+
+Both regressions in the "before" column are real: `http, https`
+produced a cookie no browser would actually store (broken login, no
+server-side signal), and `https, http` was the exact scenario the
+original round-6 Blocker existed to fix, silently broken again. The
+"after" column matches the actual live `curl -H "X-Forwarded-Proto:
+..."` output against the rebuilt stack for every row.
+
+Also verified: `apps/api` gates (`ruff`, `pytest` — 48 passed, cache
+now writing to `/tmp` via `RUFF_CACHE_DIR`/`PYTEST_ADDOPTS` instead of
+`pyproject.toml`), `apps/web` gates (`lint`, `tsc`, `vitest` — 44
+tests, full suite in ~1.6s, down from ~7s now that the timeout test no
+longer waits on a real 5s timer), `npm run build`; the corrected
+`verify-invariants` AC16 step against both a positive case (existing
+files, all pass) and a negative case (a scratch file with two exported
+actions and only one `await auth()` call, correctly fails); a full
+signup→task→analytics journey through Nginx.
+
+All test users/tasks/sessions from this pass deleted afterward.
+
 All test users/tasks/sessions from this pass deleted afterward.

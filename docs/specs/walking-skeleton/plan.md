@@ -873,12 +873,18 @@ interpolates `password` or a request-header value finds none (AC11).
 
 **Tests:** manual QA plus one goal-based check. AC1, AC2, AC11 (web
 half), AC13, AC15 (root-route half).
-- Goal-based: `! grep -rnE 'console\.[a-z]+\([^)]*password|\$\{[^}]*password' "apps/web/app/(auth)" apps/web/components apps/web/lib`
-  (no match — round-5 fix: widened from just `app/(auth)` to also cover
-  `components/` and `lib/`, since `SignUpForm`/`LoginForm` live in
-  `components/` per the decomposition and the password actually passes
-  through `lib/api-client.ts` and `lib/auth.ts`) — the concrete AC11
-  web-half check.
+- Goal-based — **canonically the `.github/workflows/ci.yml`
+  `verify-invariants` job's "No password in logs or template strings"
+  step (round-8 REVIEW correction: this line still restated the raw
+  command after round 7 moved AC21's equivalent to a pointer, missing
+  the same dedup for AC11/AC16 — see the T14 Approach entry below for
+  the fuller history of why duplication is the thing to avoid here)**:
+  no match for `console\.[a-z]+\([^)]*password|\$\{[^}]*password` in
+  `app/(auth)`, `components/`, or `lib/` (round-5 fix: widened from
+  just `app/(auth)` to also cover `components/` and `lib/`, since
+  `SignUpForm`/`LoginForm` live in `components/` per the decomposition
+  and the password actually passes through `lib/api-client.ts` and
+  `lib/auth.ts`) — the concrete AC11 web-half check.
 - **AC16 does not apply to this task** (EXECUTE-time correction): T10's
   `actions.ts` files (`app/(auth)/signup`, `app/(auth)/login`) are
   pre-auth — there is no session yet to check, since these actions are
@@ -918,16 +924,21 @@ half — the rest of AC15 is T15's clean-clone pass).
 
 **Tests:** manual QA plus one goal-based check. AC2 (interaction
 completion), AC3, AC4, AC13, AC16, AC18 (logout interaction half).
-- Goal-based: `test -z "$(grep -rL 'await auth()' 'apps/web/app/(app)' --include='actions.ts')"`
-  (corrected scope, EXECUTE-time fix: T10's original version of this
-  check ran repo-wide, which would have incorrectly failed on the
-  pre-auth `app/(auth)/*/actions.ts` files — AC16 only governs Server
-  Actions touching an *existing* user's data, which starts here, not at
-  signup/login. `grep -L` alone exits 1 on "no non-matching files
-  found," the pass case — inverted from a shell `&&`/exit-code check,
-  so `test -z "$(...)"` makes empty output the pass condition regardless
-  of grep's own exit code) — the concrete AC16 check that every
-  `(app)`-scoped `actions.ts` file reads the session.
+- Goal-based — **canonically the `.github/workflows/ci.yml`
+  `verify-invariants` job's "Every mutating Server Action verifies its
+  session" step (round-8 REVIEW correction — same dedup already applied
+  to AC21 in round 7, missed here and for AC11 above until this pass;
+  see that job for the current implementation, which has moved past
+  this description twice more since: round 7 derived the file corpus
+  from `"use server"` instead of an `actions.ts` glob, and round 8
+  widened the quote-style match and switched to a per-action rather
+  than per-file guard count)** — the concrete AC16 check that every
+  `(app)`-scoped Server Action reads the session. Original scope
+  correction (EXECUTE-time fix): T10's version of this check ran
+  repo-wide, which would have incorrectly failed on the pre-auth
+  `app/(auth)/*/actions.ts` files — AC16 only governs Server Actions
+  touching an *existing* user's data, which starts here, not at
+  signup/login.
 
 **Approach:**
 - `apps/web/app/(app)/tasks/page.tsx` (Server Component), `TaskList`,
@@ -1622,3 +1633,74 @@ noted honestly per Design decisions, not claimed as tested).
   healthy, non-root confirmed without the removed chown, the
   comma-list X-Forwarded-Proto bypass closed, full signup→task→
   analytics journey and the AC17 rate-limit burst both still pass.
+- 2026-08-18: revised after round 8 — three parallel re-review passes
+  (adversarial-reviewer, quality-engineer, security-reviewer) against
+  round 7's diff.
+
+  **Two specialists (adversarial-reviewer and quality-engineer)
+  independently disagreed with security-reviewer's round-7 fix**: the
+  `X-Forwarded-Proto` map matched the *last* comma-separated element;
+  both argued the *first* element is the one naming what protocol the
+  real client used, and every element after it is necessarily an
+  internal hop — which, in this project's actual documented topology
+  (an outer TLS-terminating proxy, guide § TLS warning), is routinely
+  plaintext by design. Adversarial-reviewer demonstrated live that
+  `X-Forwarded-Proto: https, http` (a real HTTPS client behind a
+  TLS-terminating edge, forwarded in plaintext to this Nginx — exactly
+  the guide's recommended setup) produced a *non*-`Secure` cookie under
+  the round-7 regex, i.e. the round-6 Blocker was still open for that
+  specific, primary topology. Independently re-derived and verified all
+  four disputed cases by hand before changing anything (`https`,
+  `, https`, `http, https`, `https, http`) — first-element semantics
+  correctly handle every one, including security-reviewer's own
+  originally-motivating misconfiguration pattern
+  (`$http_x_forwarded_proto,$scheme`, which produces a leading-empty
+  token before the real value). Switched to matching the first
+  non-empty element; live-verified all four cases post-fix (see
+  qa-log.md's Round 8 section) before trusting the change.
+
+  All three reviewers converged again on **CI check robustness**: AC16
+  still only matched a double-quoted `"use server"` directive (a
+  single-quoted one was invisible — the same "directive the check can't
+  see" hole round 7's fix existed to close) and checked per-file
+  instead of per-action (a file exporting N actions passed on a single
+  `await auth()` call anywhere in it) — fixed with a quote-flexible
+  regex and a per-file action-count-vs-guard-count comparison, both
+  verified locally including the negative case (a file with more
+  actions than guards correctly fails the step). Also: `plan.md` itself
+  still restated the AC11/AC16 raw grep commands in T10/T11 after round
+  7 established the dedup-to-CI pattern for AC21 — both now point at
+  the CI job instead.
+
+  **security-reviewer** also found: `logFailure`'s new warn/error split
+  put the sink behind a `console` alias the AC11 grep can't see through
+  — extended the "never logs a password" test to drive all four
+  branches that call it (previously only two), rather than widen the
+  grep itself; the 2xx-non-JSON-body catch logged `String(cause)`,
+  which for a `JSON.parse` `SyntaxError` embeds a fragment of the
+  actual response body — replaced with a static cause string; the
+  `pyproject.toml` cache-dir settings applied on host runs too, where a
+  predictable shared `/tmp` path is a multi-user race — moved into
+  `apps/api/Dockerfile` as `RUFF_CACHE_DIR`/`PYTEST_ADDOPTS` env vars,
+  scoped to where the constraint actually comes from.
+
+  **quality-engineer** also found: a 401 on a non-`/auth/` path can
+  only mean a broken `X-Internal-Secret` (a total web↔api outage), but
+  the blanket 4xx→warn demotion buried it alongside routine wrong-
+  password 401s — carved out an exception keeping that specific case at
+  `error`; the `AbortSignal.timeout` test added in round 7 to avoid a
+  slow real-time wait actually still burned ~5s of wall-clock (~90% of
+  the suite's total time), racing its own 10s test timeout — fixed by
+  mocking `AbortSignal.timeout` itself (`vi.spyOn`), which also pins
+  the exact configured duration and cut the whole suite from ~7s to
+  ~1.6s. That fix itself needed a second pass: `AbortSignal.abort()`
+  returns an already-aborted signal, and `addEventListener('abort', …)`
+  on an already-aborted signal never fires (the one abort event already
+  happened) — the fetch mock needed an explicit `signal.aborted` check
+  up front, matching what a real `fetch()` implementation does.
+
+  Verified: api (ruff, 48 pytest) and web (lint, tsc, 44 vitest in
+  ~1.6s, build) all clean; full stack rebuilt from scratch, all four
+  containers healthy; all four X-Forwarded-Proto disputed cases
+  re-verified live post-fix; full signup→task→analytics journey still
+  passes.

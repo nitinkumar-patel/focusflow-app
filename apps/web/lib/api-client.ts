@@ -22,9 +22,21 @@ interface ApiFetchOptions {
 // reference.md and had nothing to show for a failed signup, task
 // create, or session record). A 4xx is logged at warn — a wrong
 // password or a duplicate signup is an expected, routine outcome, not
-// an operational problem to page on (round-7 REVIEW nit).
+// an operational problem to page on (round-7 REVIEW nit) — except a
+// 401 on anything other than an `/auth/*` path, which apps/api only
+// ever returns for a missing/mismatched X-Internal-Secret
+// (apps/api/app/core/security.py's require_internal_secret) — i.e. a
+// broken web<->api deployment, not a user mistake, and every request
+// fails the same way (round-8 REVIEW nit: this used to log at warn
+// alongside routine 401s from `/auth/verify`, burying the one signal
+// an operator could grep for during a total outage).
 function logFailure(method: string, path: string, status: number | undefined, cause: unknown) {
-  const log = status !== undefined && status >= 400 && status < 500 ? console.warn : console.error;
+  const isRoutine =
+    status !== undefined &&
+    status >= 400 &&
+    status < 500 &&
+    !(status === 401 && !path.startsWith("/auth/"));
+  const log = isRoutine ? console.warn : console.error;
   log(`apiFetch ${method} ${path} failed`, { status, cause: String(cause) });
 }
 
@@ -93,14 +105,19 @@ export async function apiFetch<T>(
   try {
     const data = (await response.json()) as T;
     return { ok: true, data };
-  } catch (cause) {
+  } catch {
     // A 2xx response whose body isn't valid JSON — apps/api never does
     // this today, but if it ever did, this used to throw out of
     // apiFetch entirely instead of returning the ApiResult every caller
     // checks with `if (!result.ok)` — the exact silent-failure shape
     // Blocker #1 (round-6 REVIEW) was raised against (round-7 follow-up:
-    // the fix covered every failure branch except this one).
-    logFailure(method, path, response.status, cause);
+    // the fix covered every failure branch except this one). Logged
+    // with a static cause, not the caught error itself (round-8 REVIEW
+    // nit): V8's JSON.parse SyntaxError embeds the first ~10 bytes of
+    // the offending body in its message, which `String(cause)` would
+    // have written straight to the log — exactly the body-content leak
+    // this module's own docblock rules out.
+    logFailure(method, path, response.status, "response body was not valid JSON");
     return { ok: false, error: "request failed", status: response.status, safe: false };
   }
 }

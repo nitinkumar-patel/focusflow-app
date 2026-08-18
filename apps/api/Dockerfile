@@ -16,6 +16,16 @@ RUN chmod +x entrypoint.sh
 FROM base AS dev
 RUN pip install --no-cache-dir -e ".[dev]"
 COPY tests ./tests
+# /app is root-owned and world-readable but not writable by the
+# non-root runtime user below (a recursive chown would have handed
+# that user write access to its own code); /tmp is world-writable by
+# default, so ruff/pytest caches go there instead. Set here, not in
+# pyproject.toml (round-8 REVIEW fix: that file also governs a host-side
+# `ruff check .`/`pytest`, where hardcoding a shared /tmp path is an
+# unrelated multi-user race — this constraint is specific to this
+# image's filesystem layout, so it belongs in the image that has it).
+ENV RUFF_CACHE_DIR=/tmp/.ruff_cache
+ENV PYTEST_ADDOPTS="-o cache_dir=/tmp/.pytest_cache"
 # Non-root (round-6 REVIEW finding): every app container ran as root,
 # so any RCE/path-write bug in FastAPI would land as root in the
 # container. -r for a system account with no login shell. No chown —

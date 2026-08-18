@@ -100,34 +100,47 @@ describe("apiFetch", () => {
     expect(result).toEqual({ ok: true, data: { id: "1" } });
   });
 
-  it(
-    "treats a stalled apps/api as unreachable once the timeout fires, not a hang",
-    async () => {
-      // Asserting only `init.signal instanceof AbortSignal` (an earlier
-      // version of this test) passes just as well if the timeout were
-      // changed to undici's 300s default — it can't catch a regression
-      // of the behavior the fix exists for (round-7 REVIEW nit).
-      // AbortSignal.timeout() uses a native timer vitest's fake timers
-      // can't intercept, so this drives the real ~5s timeout rather
-      // than simulating it — slow but the only faithful option.
-      global.fetch = vi.fn().mockImplementation((_url, init: RequestInit) => {
-        return new Promise((_resolve, reject) => {
-          init.signal?.addEventListener("abort", () => {
-            reject(new DOMException("The operation was aborted.", "AbortError"));
-          });
+  it("treats a stalled apps/api as unreachable once the timeout fires, not a hang", async () => {
+    // Asserting only `init.signal instanceof AbortSignal` (the
+    // original version of this test) passes just as well if the
+    // timeout were changed to undici's 300s default — it can't catch a
+    // regression of the behavior the fix exists for (round-7 REVIEW
+    // nit). A round-7 fix drove the real ~5s timeout instead, which
+    // worked but made this one test ~90% of the suite's wall-clock
+    // time; mocking AbortSignal.timeout() itself gets the same
+    // regression coverage — including pinning the exact configured
+    // duration — without the wait (round-8 REVIEW nit).
+    let recordedMs: number | undefined;
+    vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+      recordedMs = ms;
+      return AbortSignal.abort(new DOMException("The operation was aborted.", "AbortError"));
+    });
+    global.fetch = vi.fn().mockImplementation((_url, init: RequestInit) => {
+      return new Promise((_resolve, reject) => {
+        // A signal from AbortSignal.abort() is already in the aborted
+        // state at creation — its one 'abort' event already fired, so
+        // a listener attached afterward (the normal case below) never
+        // sees it. Real fetch() implementations check `.aborted`
+        // synchronously up front for exactly this reason.
+        if (init.signal?.aborted) {
+          reject(init.signal.reason);
+          return;
+        }
+        init.signal?.addEventListener("abort", () => {
+          reject(new DOMException("The operation was aborted.", "AbortError"));
         });
       });
+    });
 
-      const result = await apiFetch("/tasks");
+    const result = await apiFetch("/tasks");
 
-      expect(result).toEqual({
-        ok: false,
-        error: "couldn't reach the server, try again",
-        safe: true,
-      });
-    },
-    10_000,
-  );
+    expect(result).toEqual({
+      ok: false,
+      error: "couldn't reach the server, try again",
+      safe: true,
+    });
+    expect(recordedMs).toBe(5000);
+  });
 
   it("returns safe:false with a generic detail when a 2xx response body isn't valid JSON", async () => {
     global.fetch = vi.fn().mockResolvedValue(new Response("not json", { status: 200 }));
@@ -140,18 +153,28 @@ describe("apiFetch", () => {
     // literal `console.*(...password...)` call — it can't see through
     // logFailure's indirection, so this pins the same invariant at the
     // one place a future logFailure call site could reintroduce it
-    // (round-7 REVIEW nit).
+    // (round-7 REVIEW nit). Covers all four branches that call
+    // logFailure (round-8 REVIEW nit: the original version only drove
+    // two of them).
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const marker = "shrtmk-password-marker";
+    const opts = { method: "POST" as const, body: { password: marker } };
 
     global.fetch = vi.fn().mockRejectedValue(new Error("connection refused"));
-    await apiFetch("/auth/register", { method: "POST", body: { password: marker } });
+    await apiFetch("/auth/register", opts);
 
     global.fetch = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ detail: "invalid" }), { status: 401 }),
     );
-    await apiFetch("/auth/register", { method: "POST", body: { password: marker } });
+    await apiFetch("/auth/register", opts);
+
+    global.fetch = vi.fn().mockResolvedValue(new Response("not json", { status: 200 }));
+    await apiFetch("/auth/register", opts);
+
+    vi.stubEnv("API_BASE_URL", "");
+    await apiFetch("/auth/register", opts);
+    vi.stubEnv("API_BASE_URL", "http://api:8000");
 
     for (const call of [...errorSpy.mock.calls, ...warnSpy.mock.calls]) {
       expect(JSON.stringify(call)).not.toContain(marker);
