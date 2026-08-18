@@ -34,6 +34,11 @@ target-version = "py313"
 # Alembic-generated migration bodies are boilerplate we don't hand-edit
 # for style; linting them just fights the generator on every revision.
 extend-exclude = ["migrations/versions"]
+# /app is root-owned and world-readable but not writable by the non-root
+# runtime user (round-7 REVIEW finding: a recursive chown would have
+# handed that user write access to its own code — see the Dockerfile).
+# /tmp is world-writable by default, so caches go there instead.
+cache-dir = "/tmp/.ruff_cache"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -57,3 +62,5 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
+# Same non-writable-/app reasoning as [tool.ruff]'s cache-dir above.
+cache_dir = "/tmp/.pytest_cache"

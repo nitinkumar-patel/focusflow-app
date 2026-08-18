@@ -15,13 +15,17 @@ interface ApiFetchOptions {
   userId?: string;
 }
 
-// console.error, never console.log/warn with the body/headers attached —
-// method + path + status + cause only (round-6 REVIEW finding: every
-// apiFetch failure previously vanished silently; `docker compose logs
-// web` is the read-ground-truth command per reference.md and had
-// nothing to show for a failed signup, task create, or session record).
+// console.error/console.warn, never console.log with the body/headers
+// attached — method + path + status + cause only (round-6 REVIEW
+// finding: every apiFetch failure previously vanished silently;
+// `docker compose logs web` is the read-ground-truth command per
+// reference.md and had nothing to show for a failed signup, task
+// create, or session record). A 4xx is logged at warn — a wrong
+// password or a duplicate signup is an expected, routine outcome, not
+// an operational problem to page on (round-7 REVIEW nit).
 function logFailure(method: string, path: string, status: number | undefined, cause: unknown) {
-  console.error(`apiFetch ${method} ${path} failed`, { status, cause: String(cause) });
+  const log = status !== undefined && status >= 400 && status < 500 ? console.warn : console.error;
+  log(`apiFetch ${method} ${path} failed`, { status, cause: String(cause) });
 }
 
 export async function apiFetch<T>(
@@ -86,8 +90,19 @@ export async function apiFetch<T>(
     return { ok: false, error: detail, status: response.status, safe: false };
   }
 
-  const data = (await response.json()) as T;
-  return { ok: true, data };
+  try {
+    const data = (await response.json()) as T;
+    return { ok: true, data };
+  } catch (cause) {
+    // A 2xx response whose body isn't valid JSON — apps/api never does
+    // this today, but if it ever did, this used to throw out of
+    // apiFetch entirely instead of returning the ApiResult every caller
+    // checks with `if (!result.ok)` — the exact silent-failure shape
+    // Blocker #1 (round-6 REVIEW) was raised against (round-7 follow-up:
+    // the fix covered every failure branch except this one).
+    logFailure(method, path, response.status, cause);
+    return { ok: false, error: "request failed", status: response.status, safe: false };
+  }
 }
 
 // A page or form rendering a failed result should not echo `error`

@@ -54,17 +54,102 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Every step below fails closed on a missing/renamed path (round-7
+      # REVIEW finding, confirmed independently by three reviewers): a
+      # bare `grep` exits 2 (not found) or 1 (no match) — `! grep` and
+      # `grep -L`/`grep -q` piping can't tell those apart, so a moved
+      # directory silently disarmed the check instead of failing it.
+      # Each step now asserts its target paths exist before grepping.
       - name: No password in logs or template strings (AC11, web half)
         run: |
+          test -d "apps/web/app/(auth)"
+          test -d apps/web/components
+          test -d apps/web/lib
           ! grep -rnE 'console\.[a-z]+\([^)]*password|\$\{[^}]*password' \
             "apps/web/app/(auth)" apps/web/components apps/web/lib
       - name: Every mutating Server Action verifies its session (AC16)
         run: |
-          test -z "$(grep -rL 'await auth()' 'apps/web/app/(app)' --include='actions.ts')"
+          test -d 'apps/web/app/(app)'
+          # Derived from "use server", not a fixed filename glob (round-7
+          # REVIEW finding) — an inline "use server" outside actions.ts
+          # would otherwise be invisible to this check.
+          files="$(grep -rl '"use server"' 'apps/web/app/(app)')"
+          test -n "$files"
+          fail=0
+          while IFS= read -r f; do
+            grep -q 'await auth()' "$f" || { echo "missing await auth(): $f"; fail=1; }
+          done <<< "$files"
+          exit "$fail"
       - name: No wildcard allowedOrigins/trustHost (AC21)
         run: |
+          test -f apps/web/next.config.ts
+          test -f apps/web/lib/auth.ts
           ! grep -rn 'allowedOrigins\|trustHost' apps/web/next.config.ts apps/web/lib/auth.ts \
             | grep -q '\*'
+
+  test-api:
+    name: Test (api)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Runs the real containers, not pytest directly on the runner —
+      # apps/api/app/core/config.py hardcodes the Postgres hostname as
+      # `db` (the Compose service name; see its own comment on why
+      # there's no single DATABASE_URL var to override instead), which
+      # only resolves inside the Compose network. This also means CI
+      # exercises the exact same images/entrypoint developers do
+      # locally, not a parallel test-only setup (round-7 REVIEW finding:
+      # the test suites added across rounds 1-6 were framed as "a
+      # regression here fails a gate," but no CI job actually ran them).
+      - name: Write a CI .env
+        run: |
+          cp .env.example .env
+          sed -i "s/^INTERNAL_API_SECRET=.*/INTERNAL_API_SECRET=ci-$(openssl rand -hex 16)/" .env
+          sed -i "s/^AUTH_SECRET=.*/AUTH_SECRET=ci-$(openssl rand -hex 16)/" .env
+          sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=ci-$(openssl rand -hex 16)/" .env
+      - name: Build and start db + api
+        run: docker compose up -d --build db api
+      - name: Wait for api to report healthy
+        run: |
+          for _ in $(seq 1 30); do
+            status="$(docker compose ps api --format '{{.Health}}')"
+            [ "$status" = "healthy" ] && exit 0
+            sleep 2
+          done
+          docker compose logs db api
+          exit 1
+      - name: ruff
+        run: docker compose exec -T api ruff check .
+      - name: pytest
+        run: docker compose exec -T api pytest -q
+
+  test-web:
+    name: Test (web)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: npm ci
+        working-directory: apps/web
+        run: npm ci
+      - name: lint
+        working-directory: apps/web
+        run: npm run lint
+      - name: typecheck
+        working-directory: apps/web
+        run: npx tsc --noEmit
+      - name: vitest
+        working-directory: apps/web
+        run: npm test
+      - name: build
+        working-directory: apps/web
+        env:
+          INTERNAL_API_SECRET: ci-build-secret
+          AUTH_SECRET: ci-build-secret
+          API_BASE_URL: http://api:8000
+        run: npm run build
 
   container-scan:
     name: Container image scan

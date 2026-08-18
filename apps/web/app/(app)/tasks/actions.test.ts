@@ -50,16 +50,24 @@ describe("createTaskAction", () => {
     expect(apiFetch).not.toHaveBeenCalled();
   });
 
-  it("forwards a valid, trimmed title to apiFetch", async () => {
+  it("forwards a valid, trimmed title and the session's userId to apiFetch", async () => {
     vi.mocked(apiFetch).mockResolvedValue({
       ok: true,
       data: { id: "1", title: "Write the spec", created_at: "now" },
     });
     await createTaskAction({}, formDataWithTitle("  Write the spec  "));
-    expect(apiFetch).toHaveBeenCalledWith(
-      "/tasks",
-      expect.objectContaining({ body: { title: "Write the spec" } }),
-    );
+    expect(apiFetch).toHaveBeenCalledWith("/tasks", {
+      method: "POST",
+      userId: SESSION.user.id,
+      body: { title: "Write the spec" },
+    });
+  });
+
+  it("rejects without calling apiFetch when there's no session", async () => {
+    vi.mocked(auth).mockResolvedValue(null as never);
+    const result = await createTaskAction({}, formDataWithTitle("Write the spec"));
+    expect(result.error).toBeTruthy();
+    expect(apiFetch).not.toHaveBeenCalled();
   });
 });
 
@@ -101,18 +109,24 @@ describe("recordSessionAction", () => {
     expect(apiFetch).not.toHaveBeenCalled();
   });
 
-  it("forwards valid input to apiFetch", async () => {
+  it("forwards valid input and the session's userId to apiFetch", async () => {
     vi.mocked(apiFetch).mockResolvedValue({
       ok: true,
       data: { id: "1", task_id: VALID_TASK_ID, started_at: now, ended_at: now, duration_seconds: 100 },
     });
     const result = await recordSessionAction(VALID_TASK_ID, now, now, 100);
     expect(result.ok).toBe(true);
-    expect(apiFetch).toHaveBeenCalledWith(
-      `/tasks/${VALID_TASK_ID}/sessions`,
-      expect.objectContaining({
-        body: { started_at: now, ended_at: now, duration_seconds: 100 },
-      }),
-    );
+    expect(apiFetch).toHaveBeenCalledWith(`/tasks/${VALID_TASK_ID}/sessions`, {
+      method: "POST",
+      userId: SESSION.user.id,
+      body: { started_at: now, ended_at: now, duration_seconds: 100 },
+    });
+  });
+
+  it("rejects without calling apiFetch when there's no session", async () => {
+    vi.mocked(auth).mockResolvedValue(null as never);
+    const result = await recordSessionAction(VALID_TASK_ID, now, now, 100);
+    expect(result.ok).toBe(false);
+    expect(apiFetch).not.toHaveBeenCalled();
   });
 });

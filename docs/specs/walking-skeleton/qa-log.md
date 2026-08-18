@@ -289,3 +289,39 @@ before starting) comes up.
   `429`, unaffected by the new `map` block or security headers.
 
 All test users/tasks/sessions from this pass deleted afterward.
+
+## Round 7 (adversarial + specialist re-review fixes) — 2026-08-18
+
+Verified live against a full clean rebuild (`docker compose down` then
+`up -d --build`):
+
+- **X-Forwarded-Proto comma-list bypass (security-reviewer finding),
+  the round's highest-priority fix**: signed up with
+  `-H "X-Forwarded-Proto: http, https"` (simulating a proxy that
+  appends rather than replaces the header) — session cookie came back
+  `__Secure-authjs.session-token=…; Secure`, confirming the regex fix
+  (matching the last comma-separated element) correctly reopens what
+  the exact-match version had silently broken.
+- **Non-root without the chown**: `docker compose exec api id` →
+  `uid=999(appuser)`; `docker compose exec api ls -la /app/app/main.py`
+  → `-rw-r--r-- 1 root root`, confirming appuser can read but not write
+  its own code with the recursive chown removed.
+- **ruff/pytest cache redirect**: both ran clean against the same
+  no-chown image after pointing their cache dirs at `/tmp` — `ruff
+  check .` had failed outright with "Permission denied" before this
+  fix (a real regression caught by simply re-running gates after the
+  chown removal, not by any reviewer).
+- **Healthcheck liveness fix**: full `docker compose up -d --build`
+  brought up all four containers with `web` reporting healthy before
+  `nginx` started (confirming `nginx`'s hard gate on `web`'s health is
+  satisfied), and `docker compose logs web` showed a real, transient
+  `/healthz failed { cause: 'TypeError: fetch failed' }` line during
+  api's own rebuild — the new logging working as intended, not a
+  regression.
+- **Regression check**: full signup→task-creation→analytics journey
+  through Nginx and the AC17 rate-limit burst test both still pass
+  (burst counts shifted slightly between runs due to the shared `auth`
+  zone's leaky-bucket state carrying across `/signup` and `/login`
+  requests in the same test session — expected, not a regression).
+
+All test users/tasks/sessions from this pass deleted afterward.

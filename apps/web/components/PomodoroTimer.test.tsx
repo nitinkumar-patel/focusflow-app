@@ -28,6 +28,7 @@ describe("PomodoroTimer", () => {
   it("runs work -> short break -> work automatically and calls the record-session action only after work intervals", async () => {
     render(<PomodoroTimer taskId="11111111-1111-4111-8111-111111111111" durationsSeconds={durationsSeconds} />);
 
+    const clickTime = Date.now(); // fake timers make this deterministic
     fireEvent.click(screen.getByRole("button", { name: /start focus session/i }));
     expect(screen.queryByText(/Focus:/)).not.toBeNull();
 
@@ -41,13 +42,18 @@ describe("PomodoroTimer", () => {
     // rejects a session where duration_seconds doesn't match
     // ended_at - started_at (±2s) or where taskId isn't the task's
     // real id — a regression here would only surface at runtime as a
-    // generic "Something went wrong" the user can't diagnose.
+    // generic "Something went wrong" the user can't diagnose. Asserted
+    // against the click time (not each other — round-7 REVIEW nit: both
+    // values are derived from the same `deadline` in production, so
+    // checking them against each other can't fail even if a reverted
+    // `new Date()` fallback reintroduced the bug this pins).
     const [calledTaskId, calledStartedAt, calledEndedAt, calledDuration] = vi.mocked(
       recordSessionAction,
     ).mock.calls[0];
     expect(calledTaskId).toBe("11111111-1111-4111-8111-111111111111");
     expect(calledDuration).toBe(2);
-    expect(Date.parse(calledEndedAt) - Date.parse(calledStartedAt)).toBe(calledDuration * 1000);
+    expect(Date.parse(calledStartedAt)).toBe(clickTime);
+    expect(Date.parse(calledEndedAt)).toBe(clickTime + 2000);
 
     // Short break completes (1s) -> work, no additional call.
     await act(async () => {

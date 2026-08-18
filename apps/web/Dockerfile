@@ -20,11 +20,15 @@ ENV NODE_ENV=production
 # same container (e.g. the healthcheck below) cannot.
 ENV HOSTNAME=0.0.0.0
 # Non-root (round-6 REVIEW finding, same as apps/api) — Next.js's own
-# standalone-output docs use this uid/gid convention.
+# standalone-output docs use this uid/gid convention. No --chown — the
+# server only reads these files at runtime (default COPY perms are
+# already world-readable); owning its own code would hand a post-RCE
+# attacker write access to persist across the restart: unless-stopped
+# policy below (round-7 REVIEW finding, same as apps/api's Dockerfile).
 RUN groupadd -r -g 1001 nodejs && useradd -r -g nodejs -u 1001 nextjs
-COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
-COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
-COPY --from=builder --chown=nextjs:nodejs /app/scripts/check-secrets.mjs ./scripts/check-secrets.mjs
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder /app/scripts/check-secrets.mjs ./scripts/check-secrets.mjs
 USER nextjs
 EXPOSE 3000
 CMD ["sh", "-c", "node scripts/check-secrets.mjs && node server.js"]

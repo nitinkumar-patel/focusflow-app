@@ -37,6 +37,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 30s
 
   web:
     build:
@@ -52,11 +53,19 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+    # Liveness only — any HTTP response (200 or /healthz's own 503) means
+    # the Next.js server itself is up; only a connection failure counts
+    # as unhealthy. round-7 REVIEW fix: checking r.ok made this deep-probe
+    # apps/api transitively (via /healthz's own proxy), and nginx (below)
+    # hard-gates on this service being healthy — so an api outage used to
+    # take the whole front door down instead of degrading to /healthz's
+    # real 503.
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/healthz').then(()=>process.exit(0)).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 30s
 
   nginx:
     build:

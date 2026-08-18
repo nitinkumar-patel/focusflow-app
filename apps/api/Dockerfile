@@ -18,8 +18,13 @@ RUN pip install --no-cache-dir -e ".[dev]"
 COPY tests ./tests
 # Non-root (round-6 REVIEW finding): every app container ran as root,
 # so any RCE/path-write bug in FastAPI would land as root in the
-# container. -r for a system account with no login shell.
-RUN groupadd -r appuser && useradd -r -g appuser appuser && chown -R appuser:appuser /app
+# container. -r for a system account with no login shell. No chown —
+# the process only ever reads app code (COPY's default perms are
+# already world-readable) and never writes under /app at runtime; a
+# recursive chown would have handed appuser write access to its own
+# code, letting a post-RCE attacker persist a change across the
+# restart: unless-stopped policy below (round-7 REVIEW finding).
+RUN groupadd -r appuser && useradd -r -g appuser appuser
 USER appuser
 ENTRYPOINT ["./entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

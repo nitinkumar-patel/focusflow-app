@@ -1041,18 +1041,21 @@ AC21-verification note).
   succeeding through Nginx *is* AC21's functional proof — it fails
   immediately if the forwarded-header config is wrong (Design
   decisions); separately, confirm an unauthenticated request to
-  `/tasks` redirects to `/login` (AC12); `! grep -rn
-  'allowedOrigins\|trustHost' apps/web/next.config.ts apps/web/lib/auth.ts
-  | grep -q '\*'` confirms no wildcard allowed-origins/trustHost
-  workaround was added (AC21) — **EXECUTE-time correction (round-2 REVIEW
-  finding)**: the original version scanned only `lib/auth.ts` for
-  `allowedOrigins`, where that Next.js Server Actions setting
-  (`experimental.serverActions.allowedOrigins` in `next.config.ts`) can
-  never appear, making the check vacuously pass regardless of whether a
-  wildcard was ever added; **round-3 correction**: the round-2 fix still
-  didn't match `trustHost`, spec.md's other named field, leaving a
-  `trustHost: "*"` workaround undetected — now checked as an alternation;
-  capture `docker compose
+  `/tasks` redirects to `/login` (AC12); the AC21 wildcard-origins/
+  trustHost check — **canonically the `.github/workflows/ci.yml`
+  `verify-invariants` job (round-7 REVIEW correction: this line and
+  that job used to carry the same command in two places, which is how
+  it drifted out of sync across rounds 2 and 3 below; codified into CI
+  in round 6, so this step now just re-runs that job's command rather
+  than maintaining a second copy)** — confirms no wildcard workaround
+  was added (AC21). History: **round-2 REVIEW finding**: the original
+  version scanned only `lib/auth.ts` for `allowedOrigins`, where that
+  Next.js Server Actions setting (`experimental.serverActions.allowedOrigins`
+  in `next.config.ts`) can never appear, making the check vacuously
+  pass regardless of whether a wildcard was ever added; **round-3
+  correction**: the round-2 fix still didn't match `trustHost`,
+  spec.md's other named field, leaving a `trustHost: "*"` workaround
+  undetected — now checked as an alternation; capture `docker compose
   logs web api` and grep it for the test password and both secrets as
   the running-artifact half of AC11; run a scripted burst of requests at
   `/login` and confirm a 429 appears once the configured threshold is
@@ -1556,3 +1559,66 @@ noted honestly per Design decisions, not claimed as tested).
   `web` service DNS name) but not `127.0.0.1`/`localhost` from inside
   the same container, which is what the new healthcheck used. Fixed
   with `ENV HOSTNAME=0.0.0.0` in `apps/web/Dockerfile`.
+- 2026-08-18: revised after round 7 — the adversarial-reviewer (0
+  Blockers, 0 Concerns, 0 Nits — Clean) plus fix-verification passes
+  from both specialist reviewers on round 6's diff, run in parallel.
+
+  All three reviewers independently converged on the same finding:
+  **`verify-invariants`'s three checks failed open on a missing or
+  renamed path** — `! grep` and `grep -L`/`grep -q` piping can't tell
+  "no match" (the check's real pass condition) apart from "path doesn't
+  exist" (grep's exit 2), so a route-group rename would have silently
+  disarmed AC11/AC16/AC21's CI gate instead of failing it, demonstrated
+  live by all three. Fixed by asserting each target path/corpus exists
+  before grepping, and (AC16 specifically) by deriving the scanned file
+  set from `"use server"` rather than a fixed `actions.ts` glob, so an
+  inline directive elsewhere in `app/(app)/` can't go unchecked.
+
+  **security-reviewer found the X-Forwarded-Proto fix itself had a
+  bypass**: the `map` block's exact `https` match missed a comma-list
+  value (`http, https`), which any proxy that *appends* to the header
+  instead of replacing it produces — reopening the original Blocker
+  with no signal to the operator. Verified live before and after: the
+  comma-list form previously produced a non-`Secure` cookie; the fixed
+  regex (matching the last, nearest-proxy element) now correctly
+  produces `Secure`/`__Host-`. Also flagged that the non-root fix's
+  recursive `chown -R appuser:appuser /app` handed the runtime user
+  write access to its own code — a post-RCE attacker could persist a
+  change across the new `restart: unless-stopped` policy. Removed the
+  chown entirely from both Dockerfiles (COPY's default perms are
+  already world-readable; the processes never write under `/app` at
+  runtime) — which broke `ruff`/`pytest`'s cache directories, fixed by
+  pointing both at `/tmp` (world-writable by default) via
+  `pyproject.toml`'s `cache-dir`/`cache_dir` keys.
+
+  **quality-engineer's re-review** confirmed all three of its original
+  Blockers fixed correctly, and found: `apiFetch`'s success-path
+  `response.json()` could still throw uncaught on a 2xx response with a
+  non-JSON body (the one failure branch the round-6 fix didn't cover);
+  the new Server Action tests exercised the validation-reject paths but
+  never the `!session` auth-guard branch or that `userId` (not a
+  client-supplied value) was what actually got forwarded to `apiFetch`;
+  `PomodoroTimer.test.tsx`'s new payload assertion checked
+  `ended - started == duration`, both derived from the same `deadline`
+  in production, so it couldn't fail even with the bug it was meant to
+  catch; 4xx responses (a wrong password, a duplicate signup) were
+  logged at `error` level, indistinguishable from a real 5xx when
+  scanning logs. All fixed. `check_db_connection`'s log-formatting nit
+  (Python `logging` not routed through uvicorn's handler config) and
+  the `runtime` Docker stage's permanent absence were left as noted,
+  accepted follow-ups rather than fixed in this round.
+
+  Also added: a `test-api`/`test-web` CI job pair (adversarial-reviewer
+  finding — the test suites added across rounds 1-6 were framed as "a
+  regression here fails a gate," but no CI job actually ran pytest,
+  vitest, lint, or tsc); `start_period: 30s` on both healthchecks and a
+  liveness-only (not deep-probing `api`) healthcheck for `web`, since
+  the deep-probe version plus `nginx`'s new hard gate on `web`'s health
+  meant a transient `api` outage took the entire front door down
+  instead of degrading to `/healthz`'s real 503.
+
+  Verified: api (ruff, 48 pytest) and web (lint, tsc, 44 vitest, build)
+  all clean; full stack rebuilt from scratch — all four containers
+  healthy, non-root confirmed without the removed chown, the
+  comma-list X-Forwarded-Proto bypass closed, full signup→task→
+  analytics journey and the AC17 rate-limit burst both still pass.

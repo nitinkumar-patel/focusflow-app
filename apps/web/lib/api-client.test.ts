@@ -100,11 +100,61 @@ describe("apiFetch", () => {
     expect(result).toEqual({ ok: true, data: { id: "1" } });
   });
 
-  it("passes an AbortSignal so a stalled apps/api can't hang the request forever", async () => {
-    global.fetch = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
-    await apiFetch("/tasks");
-    const callArgs = vi.mocked(global.fetch).mock.calls[0];
-    const init = callArgs[1] as RequestInit;
-    expect(init.signal).toBeInstanceOf(AbortSignal);
+  it(
+    "treats a stalled apps/api as unreachable once the timeout fires, not a hang",
+    async () => {
+      // Asserting only `init.signal instanceof AbortSignal` (an earlier
+      // version of this test) passes just as well if the timeout were
+      // changed to undici's 300s default — it can't catch a regression
+      // of the behavior the fix exists for (round-7 REVIEW nit).
+      // AbortSignal.timeout() uses a native timer vitest's fake timers
+      // can't intercept, so this drives the real ~5s timeout rather
+      // than simulating it — slow but the only faithful option.
+      global.fetch = vi.fn().mockImplementation((_url, init: RequestInit) => {
+        return new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => {
+            reject(new DOMException("The operation was aborted.", "AbortError"));
+          });
+        });
+      });
+
+      const result = await apiFetch("/tasks");
+
+      expect(result).toEqual({
+        ok: false,
+        error: "couldn't reach the server, try again",
+        safe: true,
+      });
+    },
+    10_000,
+  );
+
+  it("returns safe:false with a generic detail when a 2xx response body isn't valid JSON", async () => {
+    global.fetch = vi.fn().mockResolvedValue(new Response("not json", { status: 200 }));
+    const result = await apiFetch("/tasks");
+    expect(result).toEqual({ ok: false, error: "request failed", status: 200, safe: false });
+  });
+
+  it("never logs a submitted password on any failure branch", async () => {
+    // AC11's web-half CI check (`verify-invariants`) greps for a
+    // literal `console.*(...password...)` call — it can't see through
+    // logFailure's indirection, so this pins the same invariant at the
+    // one place a future logFailure call site could reintroduce it
+    // (round-7 REVIEW nit).
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const marker = "shrtmk-password-marker";
+
+    global.fetch = vi.fn().mockRejectedValue(new Error("connection refused"));
+    await apiFetch("/auth/register", { method: "POST", body: { password: marker } });
+
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ detail: "invalid" }), { status: 401 }),
+    );
+    await apiFetch("/auth/register", { method: "POST", body: { password: marker } });
+
+    for (const call of [...errorSpy.mock.calls, ...warnSpy.mock.calls]) {
+      expect(JSON.stringify(call)).not.toContain(marker);
+    }
   });
 });
