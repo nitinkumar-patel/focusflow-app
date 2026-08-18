@@ -49,14 +49,19 @@ async def test_by_day_sums_seeded_sessions(client: AsyncClient) -> None:
     task_id = await _create_task(client, user_id, "Deep work")
 
     now = datetime.now(UTC)
-    await _record_session(client, user_id, task_id, now - timedelta(seconds=1500), 1500)
+    started_at = now - timedelta(seconds=1500)
+    await _record_session(client, user_id, task_id, started_at, 1500)
 
     response = await client.get("/analytics/focus-time", headers=_headers(user_id))
     assert response.status_code == 200
     body = response.json()
-    today_str = now.date().isoformat()
-    today_bucket = next(b for b in body["by_day"] if b["date"] == today_str)
-    assert today_bucket["minutes"] == 25.0
+    # Bucketed by started_at's UTC calendar date, not now's — these
+    # differ within the ~25 minutes around UTC midnight (flaky-test fix,
+    # caught live: this run started at 2026-08-18T00:04 UTC, so a
+    # session starting 25 minutes earlier fell on 2026-08-17).
+    expected_str = started_at.date().isoformat()
+    expected_bucket = next(b for b in body["by_day"] if b["date"] == expected_str)
+    assert expected_bucket["minutes"] == 25.0
 
 
 async def test_by_task_sums_seeded_sessions(client: AsyncClient) -> None:

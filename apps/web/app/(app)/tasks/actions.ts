@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 
-import { apiFetch, type ApiResult } from "@/lib/api-client";
+import { apiFetch, safeErrorMessage, type ApiResult } from "@/lib/api-client";
 import { auth } from "@/lib/auth";
 
 export interface Task {
@@ -19,7 +19,7 @@ export interface Task {
 export async function getTasks(): Promise<ApiResult<Task[]>> {
   const session = await auth();
   if (!session?.user?.id) {
-    return { ok: false, error: "You must be logged in." };
+    return { ok: false, error: "You must be logged in.", safe: true };
   }
 
   return apiFetch<Task[]>("/tasks", { userId: session.user.id });
@@ -56,7 +56,14 @@ export async function createTaskAction(
   });
 
   if (!result.ok) {
-    return { error: result.error };
+    // Filtered here, not at render time — `useActionState` serializes
+    // whatever this action returns into the page's hydration payload
+    // for the next submission, so an unsafe raw string must never be
+    // part of the returned state at all, not just kept out of the
+    // rendered DOM (round-4 REVIEW follow-up: the render-time filter
+    // alone still leaked the raw string into the page source via that
+    // mechanism).
+    return { error: safeErrorMessage(result) };
   }
 
   revalidatePath("/tasks");
@@ -74,6 +81,7 @@ export interface PomodoroSession {
 export interface RecordSessionResult {
   ok: boolean;
   error?: string;
+  safe?: boolean;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -91,7 +99,7 @@ export async function recordSessionAction(
 ): Promise<RecordSessionResult> {
   const session = await auth();
   if (!session?.user?.id) {
-    return { ok: false, error: "You must be logged in." };
+    return { ok: false, error: "You must be logged in.", safe: true };
   }
 
   // Defense in depth (spec Boundaries § Always do) — PomodoroTimer is
@@ -115,7 +123,7 @@ export async function recordSessionAction(
   });
 
   if (!result.ok) {
-    return { ok: false, error: result.error };
+    return { ok: false, error: result.error, safe: result.safe };
   }
 
   // The timer lives on /tasks; the chart lives on /analytics — a

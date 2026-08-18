@@ -161,8 +161,7 @@ spec's design-intent bar.
   is an RSC flight payload (not an HTML document), which is what
   "without a page reload" means at the protocol level; see
   `docs/specs/walking-skeleton/qa-log.md`'s verification-methodology
-  caveat for what this can and can't prove versus an actual browser
-  (round-3 REVIEW finding).
+  caveat for what this can and can't prove versus an actual browser.
 - **Breaks are never recorded as sessions** (AC7): covered by T12's
   component test (fake timers, mocked record-session action) asserting
   zero calls across break transitions — not the FastAPI surface, since
@@ -211,9 +210,7 @@ spec's design-intent bar.
   wire protocol against the same running containers, which proves every
   server-side effect (session established, row written, next response
   reflects it) but — per `qa-log.md`'s verification-methodology caveat
-  — cannot itself observe client-side rendering the way a browser would
-  (round-3 REVIEW finding: this line previously implied the browser
-  drive always happens, without naming the substitute actually used).
+  — cannot itself observe client-side rendering the way a browser would.
 - **Clean-clone self-host via the guide, including the TLS warning**
   (AC15, AC20): visual / manual QA, exercised in T15 — a fresh clone,
   following only the documented steps.

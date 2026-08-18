@@ -6,6 +6,8 @@ import { signUpAction, type SignUpFormState } from "@/app/(auth)/signup/actions"
 
 const initialState: SignUpFormState = {};
 
+// signUpAction already filters an unsafe error down to display-safe
+// copy before returning (see its comment) — nothing to filter here.
 export function SignUpForm() {
   const [state, formAction, isPending] = useActionState(signUpAction, initialState);
 

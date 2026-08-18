@@ -5,7 +5,7 @@
 
 export type ApiResult<T> =
   | { ok: true; data: T }
-  | { ok: false; error: string; status?: number };
+  | { ok: false; error: string; status?: number; safe: boolean };
 
 interface ApiFetchOptions {
   method?: "GET" | "POST";
@@ -20,7 +20,8 @@ export async function apiFetch<T>(
   const apiBaseUrl = process.env.API_BASE_URL;
   const internalSecret = process.env.INTERNAL_API_SECRET;
   if (!apiBaseUrl || !internalSecret) {
-    return { ok: false, error: "server misconfigured" };
+    // Not safe to show verbatim — names what's broken in the deployment.
+    return { ok: false, error: "server misconfigured", safe: false };
   }
 
   const headers: Record<string, string> = {
@@ -40,7 +41,9 @@ export async function apiFetch<T>(
       cache: "no-store",
     });
   } catch {
-    return { ok: false, error: "couldn't reach the server, try again" };
+    // Safe to show verbatim — static copy, names nothing about the
+    // deployment beyond "the network call didn't complete".
+    return { ok: false, error: "couldn't reach the server, try again", safe: true };
   }
 
   if (!response.ok) {
@@ -58,21 +61,26 @@ export async function apiFetch<T>(
     } catch {
       // Body wasn't JSON — keep the generic message.
     }
-    return { ok: false, error: detail, status: response.status };
+    // Not safe — this is apps/api's raw `detail` (or the generic
+    // fallback), never vetted for end-user display.
+    return { ok: false, error: detail, status: response.status, safe: false };
   }
 
   const data = (await response.json()) as T;
   return { ok: true, data };
 }
 
-// A page rendering a failed ApiResult should not echo it unconditionally
-// — `status` set means apps/api returned a real HTTP error response,
-// whose `detail` (or "server misconfigured"/"request failed") isn't
-// meant for an end user and could name what's broken in the deployment.
-// No `status` means apiFetch never got a response at all (network
-// failure) or the caller's own pre-flight check failed (e.g. "You must
-// be logged in.") — both of those strings are already safe, static
-// copy written for display (round-3 REVIEW finding).
-export function safeErrorMessage(result: { error: string; status?: number }): string {
-  return result.status === undefined ? result.error : "Something went wrong. Try again.";
+// A page or form rendering a failed result should not echo `error`
+// unconditionally — some of apiFetch's own failure strings ("server
+// misconfigured", apps/api's raw `detail`) aren't meant for an end
+// user and could name what's broken in the deployment. `safe` is the
+// explicit discriminant for that (round-4 REVIEW fix: an earlier
+// version inferred safety from whether `status` was set, which
+// misclassified "server misconfigured" — a safe-*looking* string with
+// no status — as fine to show). Callers that construct their own
+// `error` directly (not via apiFetch) — e.g. "You must be logged in."
+// — omit `safe`, which defaults true: it's static copy they wrote for
+// display, not upstream data.
+export function safeErrorMessage(result: { error: string; safe?: boolean }): string {
+  return result.safe === false ? "Something went wrong. Try again." : result.error;
 }

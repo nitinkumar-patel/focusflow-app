@@ -1356,3 +1356,53 @@ noted honestly per Design decisions, not claimed as tested).
   comment. `qa-log.md` gained sections covering the round-1-introduced
   error states (previously untested) and AC13's primary-action-count
   observation per screen.
+- 2026-08-17: revised after implementation-mode adversarial review round
+  3 (2 Blockers, 4 Concerns, 4 Nits) — findings against the round-2 fix
+  commit. `recordSessionAction`'s round-2 re-validation had no test/QA
+  drive, and the vitest fixture's `taskId="task-1"` would itself have
+  failed the new UUID check were the action not mocked — fixture
+  changed to a real UUID shape, reject paths driven live (see T14
+  Approach and `qa-log.md`). `spec.md`'s Testing Strategy amended to
+  name curl-replicated Server Actions as the actual verification
+  mechanism (no browser available in this environment) rather than
+  implying a browser drive always happens. The AC21 wildcard check
+  still missed `trustHost` (spec.md's other named field) — widened to
+  an alternation. This file's own `env_file: .env` references (three of
+  them) were stale after round 2 switched both services to explicit
+  `environment:` lists — corrected. The AC5 duplicate-constant
+  enumeration above named the wrong file (`pomodoro-cycle.ts` instead
+  of `pomodoro-durations.ts`) and missed the third copy round 2 added
+  to `tasks/actions.ts` — both fixed.
+- 2026-08-17: revised after implementation-mode adversarial review round
+  4 (2 Blockers, 1 Concern, 0 Nits carried forward — see below) —
+  findings against the round-3 fix commit. The round-3
+  `safeErrorMessage()` fix shipped with a real classification bug: it
+  inferred "safe to show" from whether `apiFetch`'s result carried an
+  HTTP `status`, which wrongly treated `"server misconfigured"` (no
+  status, since the failure happens before any request is sent) as
+  safe — the exact string the fix was meant to hide. Replaced the
+  inference with an explicit `safe: boolean` on `ApiResult`'s failure
+  branch, set correctly at each of `apiFetch`'s three failure returns;
+  threaded the same flag through `CreateTaskFormState` and
+  `RecordSessionResult` so `TaskForm` and `PomodoroTimer` — the two
+  mutating-action render sites `safeErrorMessage` hadn't reached yet —
+  now apply the same suppression `/tasks` and `/analytics` do. Added
+  `apps/web/lib/api-client.test.ts`, since the whole `safe`/unsafe
+  split had shipped with zero test coverage twice in a row.
+  Self-caught during live verification (blanking `API_BASE_URL` and
+  confirming `"server misconfigured"` no longer surfaces): `signUpAction`
+  had the identical unconditional-echo bug and wasn't named by the
+  round-4 finding — fixed the same way. That same live check also
+  surfaced a subtler leak the render-time filter couldn't close:
+  `useActionState` serializes whatever a bound action returns into the
+  page's hydration payload (visible in page source, in the hidden
+  `$ACTION_N:1` previous-state field) so it can pass it back in on the
+  next submission — meaning `createTaskAction` and `signUpAction`'s raw
+  unsafe string was reaching the client regardless of what `TaskForm`/
+  `SignUpForm` chose to render. Moved the `safeErrorMessage()` call
+  inside both actions instead, so only the already-filtered string is
+  ever part of the returned state; `RecordSessionResult`
+  (`recordSessionAction`, invoked directly rather than via
+  `useActionState`) keeps the render-time filter, since a directly
+  invoked action's result crosses the network exactly once, in that
+  request's own response, not embedded in subsequent page loads.

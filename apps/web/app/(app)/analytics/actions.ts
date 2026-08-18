@@ -26,7 +26,7 @@ export interface FocusTimeResponse {
 export async function getFocusTime(): Promise<ApiResult<FocusTimeResponse>> {
   const session = await auth();
   if (!session?.user?.id) {
-    return { ok: false, error: "You must be logged in." };
+    return { ok: false, error: "You must be logged in.", safe: true };
   }
 
   return apiFetch<FocusTimeResponse>("/analytics/focus-time", { userId: session.user.id });

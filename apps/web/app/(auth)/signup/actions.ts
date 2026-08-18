@@ -2,7 +2,7 @@
 
 import { AuthError } from "next-auth";
 
-import { apiFetch } from "@/lib/api-client";
+import { apiFetch, safeErrorMessage } from "@/lib/api-client";
 import { signIn } from "@/lib/auth";
 
 export interface SignUpFormState {
@@ -44,7 +44,13 @@ export async function signUpAction(
   });
 
   if (!result.ok) {
-    return { error: result.status === 409 ? "That email is already registered." : result.error };
+    // Filtered here, not at render time — `useActionState` serializes
+    // whatever this action returns into the page's hydration payload
+    // for the next submission, so an unsafe raw string must never be
+    // part of the returned state at all (round-4 REVIEW follow-up).
+    return result.status === 409
+      ? { error: "That email is already registered." }
+      : { error: safeErrorMessage(result) };
   }
 
   try {

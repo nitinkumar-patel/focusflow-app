@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { recordSessionAction } from "@/app/(app)/tasks/actions";
+import { safeErrorMessage } from "@/lib/api-client";
 import { firstInterval, nextInterval, type IntervalKind } from "@/lib/pomodoro-cycle";
 import type { DurationsSeconds } from "@/lib/pomodoro-durations";
 
@@ -69,7 +70,12 @@ export function PomodoroTimer({ taskId, durationsSeconds }: PomodoroTimerProps) 
         )
           .then((result) => {
             if (!result.ok) {
-              setRecordError(result.error ?? "Couldn't record this session.");
+              setRecordError(
+                safeErrorMessage({
+                  error: result.error ?? "Couldn't record this session.",
+                  safe: result.safe,
+                }),
+              );
             }
           })
           .catch(() => setRecordError("Couldn't record this session."));

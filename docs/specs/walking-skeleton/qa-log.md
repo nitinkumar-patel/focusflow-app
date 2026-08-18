@@ -200,3 +200,30 @@ Re-ran the clean clone after the fix: stack came up clean, `GET
 `<h1>Sign up</h1>` — the guide's Done-when condition (AC15, AC20).
 Torn down (`docker compose down -v`) and the scratch clone deleted
 after the check.
+
+## safeErrorMessage's safe/unsafe classification — 2026-08-17
+
+Round-4 REVIEW found the round-3 `safeErrorMessage` fix inferred
+safety from `apiFetch`'s `status` field, which misclassified
+`"server misconfigured"` (no status, since it fails before any request
+is sent) as safe to show — the exact string the fix existed to hide.
+Fixed with an explicit `safe: boolean` set correctly at each of
+`apiFetch`'s three failure returns.
+
+Verified live: temporarily blanked `API_BASE_URL` in `.env`,
+`docker compose up -d --build web` (the container still starts —
+`scripts/check-secrets.mjs` only guards `INTERNAL_API_SECRET`/
+`AUTH_SECRET`), then drove `POST /signup` with a valid email/password
+through Nginx. Rendered error: "Something went wrong. Try again." —
+not the raw `"server misconfigured"` string.
+
+This surfaced a second, subtler issue beyond the round-4 finding's
+scope: the raw string was still present in the response body (inside
+`useActionState`'s serialized previous-state payload — both the hidden
+`$ACTION_1:1` form field and the `self.__next_f` hydration script),
+even though it was never rendered as visible text. Confirmed via
+`grep -c 'server misconfigured' <response body>` before and after
+moving the `safeErrorMessage()` call from render time (`TaskForm`/
+`SignUpForm`) into the actions themselves (`createTaskAction`/
+`signUpAction`) — 2 matches before the fix, 0 after, same signup drive
+repeated against a fresh rebuild. `API_BASE_URL` restored afterward.
