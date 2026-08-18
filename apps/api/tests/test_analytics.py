@@ -129,20 +129,28 @@ async def test_by_day_buckets_in_utc(client: AsyncClient) -> None:
     now = datetime.now(UTC)
     today = now
     yesterday = now - timedelta(days=1)
+    today_started_at = today - timedelta(seconds=60)
+    yesterday_started_at = yesterday - timedelta(seconds=60)
 
     # Yesterday's session first, so it's not "recent" when today's is
     # submitted — otherwise T7's rapid-duplicate-for-same-task guard
     # would reject the second request.
-    await _record_session(client, user_id, task_id, yesterday - timedelta(seconds=60), 60)
-    await _record_session(client, user_id, task_id, today - timedelta(seconds=60), 60)
+    await _record_session(client, user_id, task_id, yesterday_started_at, 60)
+    await _record_session(client, user_id, task_id, today_started_at, 60)
 
     response = await client.get(
         "/analytics/focus-time", params={"days": 7}, headers=_headers(user_id)
     )
     body = response.json()
-    today_bucket = next(b for b in body["by_day"] if b["date"] == today.date().isoformat())
+    # Bucketed by each session's actual started_at date, not `today`/
+    # `yesterday` themselves — these can differ within the 60 seconds
+    # around UTC midnight (same class of flake fixed in
+    # test_by_day_sums_seeded_sessions above).
+    today_bucket = next(
+        b for b in body["by_day"] if b["date"] == today_started_at.date().isoformat()
+    )
     yesterday_bucket = next(
-        b for b in body["by_day"] if b["date"] == yesterday.date().isoformat()
+        b for b in body["by_day"] if b["date"] == yesterday_started_at.date().isoformat()
     )
     assert today_bucket["minutes"] == 1.0
     assert yesterday_bucket["minutes"] == 1.0

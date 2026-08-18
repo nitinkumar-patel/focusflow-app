@@ -81,7 +81,6 @@ export interface PomodoroSession {
 export interface RecordSessionResult {
   ok: boolean;
   error?: string;
-  safe?: boolean;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -99,7 +98,7 @@ export async function recordSessionAction(
 ): Promise<RecordSessionResult> {
   const session = await auth();
   if (!session?.user?.id) {
-    return { ok: false, error: "You must be logged in.", safe: true };
+    return { ok: false, error: "You must be logged in." };
   }
 
   // Defense in depth (spec Boundaries § Always do) — PomodoroTimer is
@@ -123,7 +122,13 @@ export async function recordSessionAction(
   });
 
   if (!result.ok) {
-    return { ok: false, error: result.error, safe: result.safe };
+    // Filtered here too (round-5 REVIEW finding) — even though this
+    // action isn't useActionState-bound, so its result doesn't persist
+    // into the page's hydration payload, an unfiltered raw string is
+    // still visible in this request's own Network-tab response. Same
+    // rule as createTaskAction/signUpAction: filter before returning,
+    // don't rely on the caller to filter at render time.
+    return { ok: false, error: safeErrorMessage(result) };
   }
 
   // The timer lives on /tasks; the chart lives on /analytics — a

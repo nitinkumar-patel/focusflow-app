@@ -1406,3 +1406,24 @@ noted honestly per Design decisions, not claimed as tested).
   `useActionState`) keeps the render-time filter, since a directly
   invoked action's result crosses the network exactly once, in that
   request's own response, not embedded in subsequent page loads.
+- 2026-08-17: revised after implementation-mode adversarial review round
+  5 (0 Blockers, 3 Concerns) — findings against the round-4 fix commit.
+  The "render-time filter is fine for the directly invoked action"
+  reasoning from round 4 was half right: it correctly meant the raw
+  string never persists into a later page's source, but it's still
+  visible in that one failed request's own Network-tab response body —
+  a real, if narrower, exposure than the `useActionState` case, and one
+  the same commit's own principle ("an unsafe raw string must never be
+  part of the returned state at all") already ruled out. Moved
+  `safeErrorMessage()` inside `recordSessionAction` too, for
+  consistency with `createTaskAction`/`signUpAction`; `RecordSessionResult`
+  dropped its `safe` field (filtering happens before return, same as
+  the other two actions) and `PomodoroTimer.tsx` simplified back to
+  rendering `result.error` directly — `PomodoroTimer.test.tsx`'s
+  existing mock (`{ok:false, error:"duplicate session"}`, no `safe`
+  field) needed no change, since that's exactly the shape
+  `recordSessionAction` returns now. Also fixed the identical
+  UTC-midnight flake pattern one test below the round-4 fix
+  (`test_by_day_buckets_in_utc`, same root cause: bucket lookups keyed
+  on `now`'s date instead of the actually-recorded `started_at`'s
+  date).

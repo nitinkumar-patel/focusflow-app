@@ -227,3 +227,18 @@ moving the `safeErrorMessage()` call from render time (`TaskForm`/
 `SignUpForm`) into the actions themselves (`createTaskAction`/
 `signUpAction`) — 2 matches before the fix, 0 after, same signup drive
 repeated against a fresh rebuild. `API_BASE_URL` restored afterward.
+
+**Round-5 follow-up — `recordSessionAction`:** round-5 REVIEW pointed
+out the same unfiltered-echo issue existed in `recordSessionAction`
+(exposed in that request's own response body, not persisted via
+`useActionState` since it isn't bound to it, but still visible in the
+network response). Verified live: signed up, created a task, recorded
+one real session (succeeds), then immediately recorded a second
+session for the same task through the real `Next-Action` protocol —
+triggers T7's rapid-duplicate-for-same-task guard (60s window).
+Before the fix this would have returned apps/api's raw `detail`
+("a session for this task was just recorded"); after moving
+`safeErrorMessage()` inside `recordSessionAction`, the response was
+`{"ok":false,"error":"Something went wrong. Try again."}` with no
+trace of the raw detail string anywhere in the response body. Test
+user, task, and session deleted afterward.
