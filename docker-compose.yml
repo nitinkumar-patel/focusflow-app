@@ -27,6 +27,16 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # round-6 REVIEW finding: no service but `db` restarted on crash or
+    # came back after a host reboot — a self-hosted deliverable (AC15)
+    # needs both. stdlib-only healthcheck (no curl/wget in the slim
+    # image) so it costs nothing to add.
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   web:
     build:
@@ -41,6 +51,12 @@ services:
       POMODORO_TEST_SHORT_INTERVALS: ${POMODORO_TEST_SHORT_INTERVALS:-}
     depends_on:
       - api
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   nginx:
     build:
@@ -48,7 +64,9 @@ services:
     ports:
       - "80:80"
     depends_on:
-      - web
+      web:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   db_data:

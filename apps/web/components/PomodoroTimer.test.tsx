@@ -37,6 +37,17 @@ describe("PomodoroTimer", () => {
     });
     expect(screen.queryByText(/Short break:/)).not.toBeNull();
     expect(recordSessionAction).toHaveBeenCalledTimes(1);
+    // Payload, not just call count (round-6 REVIEW finding): apps/api
+    // rejects a session where duration_seconds doesn't match
+    // ended_at - started_at (±2s) or where taskId isn't the task's
+    // real id — a regression here would only surface at runtime as a
+    // generic "Something went wrong" the user can't diagnose.
+    const [calledTaskId, calledStartedAt, calledEndedAt, calledDuration] = vi.mocked(
+      recordSessionAction,
+    ).mock.calls[0];
+    expect(calledTaskId).toBe("11111111-1111-4111-8111-111111111111");
+    expect(calledDuration).toBe(2);
+    expect(Date.parse(calledEndedAt) - Date.parse(calledStartedAt)).toBe(calledDuration * 1000);
 
     // Short break completes (1s) -> work, no additional call.
     await act(async () => {

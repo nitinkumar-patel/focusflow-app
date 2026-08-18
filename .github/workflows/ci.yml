@@ -4,6 +4,11 @@ on:
   push:
   pull_request:
 
+# Floors the GITHUB_TOKEN every job gets to read-only by default (round-6
+# REVIEW Concern) — none of these jobs push, comment, or modify anything.
+permissions:
+  contents: read
+
 jobs:
   secret-scan:
     name: Secret scan
@@ -43,6 +48,23 @@ jobs:
           pip install .
           pip install pip-audit
           pip-audit
+
+  verify-invariants:
+    name: Verify security invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No password in logs or template strings (AC11, web half)
+        run: |
+          ! grep -rnE 'console\.[a-z]+\([^)]*password|\$\{[^}]*password' \
+            "apps/web/app/(auth)" apps/web/components apps/web/lib
+      - name: Every mutating Server Action verifies its session (AC16)
+        run: |
+          test -z "$(grep -rL 'await auth()' 'apps/web/app/(app)' --include='actions.ts')"
+      - name: No wildcard allowedOrigins/trustHost (AC21)
+        run: |
+          ! grep -rn 'allowedOrigins\|trustHost' apps/web/next.config.ts apps/web/lib/auth.ts \
+            | grep -q '\*'
 
   container-scan:
     name: Container image scan

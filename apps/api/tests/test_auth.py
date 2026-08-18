@@ -129,11 +129,17 @@ async def test_no_password_in_logs_or_responses(
     )
     responses_text.append(r3.text)
 
+    # A distinct marker (round-6 REVIEW finding): asserting the *other*
+    # request's password is absent from this 422 body is vacuously true
+    # regardless of whether the 422 handler echoes its own input — this
+    # value must actually appear in the request to test anything.
+    short_password_marker = "shrtmk"
     r4 = await client.post(
         "/auth/register",
-        json={"email": "judy@example.com", "password": "short"},
+        json={"email": "judy@example.com", "password": short_password_marker},
         headers=HEADERS,
     )
+    assert short_password_marker not in r4.text
     responses_text.append(r4.text)
 
     for text in responses_text:

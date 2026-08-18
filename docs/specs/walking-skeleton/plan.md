@@ -1427,3 +1427,132 @@ noted honestly per Design decisions, not claimed as tested).
   (`test_by_day_buckets_in_utc`, same root cause: bucket lookups keyed
   on `now`'s date instead of the actually-recorded `started_at`'s
   date).
+- 2026-08-18: adversarial-reviewer converged to Clean after round 6 (0
+  Blockers, 0 Concerns, 0 Nits against the round-5 fix commit). Full
+  mode's mandatory specialist reviewers then ran for the first time
+  against the whole implementation (not a prior round's fix diff):
+  `quality-engineer` (testability/observability/reliability lens) and
+  `security-reviewer` (threat-model lens), in parallel.
+
+  **quality-engineer** (3 Blockers, 10 Concerns, 3 Nits) found the
+  class of bug the whole `safeErrorMessage` saga had been fixing —
+  swallowed/misclassified errors — was itself unlogged: every
+  `apiFetch` failure and `check_db_connection`'s exception vanished
+  with no line in `docker compose logs`, contradicting
+  `reference.md`'s own Observability standard. Added `console.error`
+  at `apiFetch`'s three failure sites, `/healthz`'s route handler, and
+  a Python `logger.exception` in `check_db_connection`. Added an
+  `AbortSignal.timeout` to `apiFetch` and the web `/healthz` route so a
+  stalled `api` fails fast instead of hanging for `fetch`'s default
+  timeout. `apiFetch` itself — the function whose classification broke
+  three review rounds running — had zero test coverage (only the
+  pure `safeErrorMessage` dispatcher was tested); added
+  `apps/web/lib/api-client.test.ts` cases stubbing `global.fetch` for
+  each failure branch. Made `safeErrorMessage`'s `safe` parameter
+  required instead of optional — the optional form defaulted to
+  *showing* the message when omitted, the same fail-open shape as the
+  bug it exists to prevent. `apps/web/app/healthz/route.ts` was the one
+  path that bypassed the whole `ApiResult`/`safe` mechanism entirely,
+  returning `"API_BASE_URL unset"`/`"api unreachable"` directly to an
+  unauthenticated public endpoint — fixed to return only `{"status":
+  "error"}` with the cause logged server-side. Added a
+  `validateSessionInput`-equivalent test suite
+  (`apps/web/app/(app)/tasks/actions.test.ts`,
+  `apps/web/app/(auth)/signup/actions.test.ts`) for the Server Action
+  re-validation added across rounds 1/2/5, previously evidenced only by
+  a dated manual curl transcript. `PomodoroTimer.test.tsx` now asserts
+  the actual payload forwarded to `recordSessionAction` (taskId,
+  duration, and that `ended - started == duration`), not just call
+  counts. Fixed a real edge case in `PomodoroTimer.tsx`: the
+  `startedAt ?? new Date()` fallback (unreachable in practice, since
+  `startedAt`/`deadline` are always set together) would have built a
+  payload `apps/api` is guaranteed to reject had it ever fired —
+  replaced with a value derived from `deadline`, which also made the
+  `startedAt` state variable itself dead and removable.
+  `apps/api/tests/test_seed.py`'s password-generation test asserted
+  `"password" in out.lower()`, which matches the log line's own label
+  and would pass even if `_seed()` reverted to a hardcoded password
+  (the exact CWE-798 regression it exists to catch) — rewrote to parse
+  the actual generated token and verify it against the stored hash.
+  Added `apps/api/tests/test_config.py`, an isolated unit test for
+  `Settings.fail_closed_on_missing_secrets()` (AC19) and
+  `apps/web/scripts/check-secrets.test.ts` for its web-side
+  counterpart — the only prior evidence was a confounded whole-stack
+  observation, since an empty `POSTGRES_PASSWORD` stops `db` before
+  either app's own check runs. Added `require_user_id`'s missing
+  malformed-header and unknown-user-id test cases. Codified the three
+  goal-based invariant greps (AC11 web-half, AC16, AC21) as a new
+  `verify-invariants` CI job — they previously existed only as commands
+  in `plan.md`, run once by hand, with nothing to catch a regression.
+  Fixed a redundant/vacuous assertion in `test_auth.py`'s
+  no-password-leak test (asserted the *other* request's marker password
+  was absent from a 422 body that never contained it). Deleted
+  `apps/api/Dockerfile`'s `runtime` stage (documented in round 4 as an
+  "eventual lean-production target," never built by anything) rather
+  than keep it as dead code. Added `restart: unless-stopped` and a
+  stdlib-only `healthcheck:` to `api`/`web` in `docker-compose.yml`,
+  and made `nginx` wait on `web`'s health rather than a bare
+  `depends_on` — a self-hosted deliverable (AC15) needs a component
+  that crashes or a rebooted host to actually come back.
+
+  **security-reviewer** (1 Blocker, 8 Concerns, 6 Nits) found a real
+  vulnerability in the exact deployment topology AC20's guide
+  recommends: Nginx unconditionally forwarded `X-Forwarded-Proto:
+  $scheme`, and since this Nginx has no TLS listener `$scheme` is
+  always `http` — so an outer TLS-terminating proxy's correct `https`
+  value was overwritten before NextAuth ever saw it, and Auth.js (which
+  keys `useSecureCookies` off the forwarded proto) issued session
+  cookies without `Secure`. Verified live (probing `web:3000` directly
+  with a forged `X-Forwarded-Proto: https` header showed the cookie
+  gaining `Secure`/`__Host-`; the same request through Nginx did not).
+  Fixed with a `map $http_x_forwarded_proto $forwarded_proto` block
+  that trusts an incoming value rather than clobbering it, matching the
+  topology the guide already assumes elsewhere (this Nginx becomes
+  internal-only once an outer proxy is added, same premise as the
+  existing `real_ip` rate-limit caveat); documented in the guide.
+  Fixed cheaply: every app container ran as root (added a non-root
+  `USER` to both Dockerfiles); no baseline response headers and
+  `Server`/`X-Powered-By` version disclosure (`server_tokens off`,
+  `add_header` for nosniff/frame-options/referrer-policy, Next's
+  `poweredByHeader: false`); `.env` ships world-readable with no
+  explanation of what each secret buys an attacker (`chmod 600` +
+  explanation added to the guide); CI's `GITHUB_TOKEN` had no
+  `permissions:` floor (added `contents: read` at the workflow level);
+  the web Docker builder's `COPY . .` could bake a local `.env.local`
+  into the image (`.dockerignore` fix); FastAPI's `/docs`/`/openapi.json`
+  carried no `require_internal_secret` dependency, unlike every real
+  route (disabled via `docs_url=None` etc.); the rate-limit-behind-a-proxy
+  guide caveat didn't cover Docker Desktop's own NAT collapsing every
+  client to one IP even with no extra proxy (documented alongside the
+  existing caveat); logout cannot revoke an already-issued 7-day JWT
+  (documented in the guide's TLS section, next to the warning that
+  makes it matter).
+
+  **Explicitly deferred** (real findings, but production-hardening
+  scope beyond this walking skeleton's appetite — "a few weeks, not a
+  quarter" — rather than gaps in the skeleton's own stated ACs):
+  least-privileged Postgres role (the app connects as the DB superuser;
+  `security-reviewer` Concern #4); pagination/quotas on `GET /tasks`
+  and task creation (security-reviewer Concern #5); an `nginx`
+  default-server catch-all block backing `trustHost: true`'s Host-header
+  assumption (security-reviewer Concern #8 — the reviewer could not
+  demonstrate this live and called it a stale-premise finding, not a
+  live one); `AUTH_URL` pinned to the public origin, to stop internal
+  container hostnames appearing in NextAuth redirect URLs
+  (security-reviewer Nit #10 — narrow, and the reviewer confirmed the
+  real Server-Action-driven login path doesn't hit it); structured
+  per-user auth-event logging and bounded Docker log retention
+  (security-reviewer Nit #15 — `apiFetch`'s new failure logging covers
+  the client side; a real audit trail is a bigger feature). None of
+  these block AC1-AC22; each would need its own follow-up spec.
+
+  **Live rebuild surfaced one more real bug**, unrelated to either
+  reviewer's findings: adding a non-root `USER` + a container
+  `healthcheck:` to `apps/web` (a quality-engineer fix) made the
+  container report unhealthy — Next.js's standalone `server.js` binds
+  to `process.env.HOSTNAME`, which Docker sets to the container's short
+  id, not an address, so the server accepted connections addressed to
+  that specific container IP (reachable from other containers via the
+  `web` service DNS name) but not `127.0.0.1`/`localhost` from inside
+  the same container, which is what the new healthcheck used. Fixed
+  with `ENV HOSTNAME=0.0.0.0` in `apps/web/Dockerfile`.

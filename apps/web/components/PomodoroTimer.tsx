@@ -29,7 +29,6 @@ export function PomodoroTimer({ taskId, durationsSeconds }: PomodoroTimerProps) 
   const [kind, setKind] = useState<IntervalKind>(() => firstInterval().kind);
   const [completedWorkIntervals, setCompletedWorkIntervals] = useState(0);
   const [running, setRunning] = useState(false);
-  const [startedAt, setStartedAt] = useState<Date | null>(null);
   // Absolute deadline (not a tick count) — a background tab throttles
   // setInterval, but comparing against Date.now() on whatever tick does
   // fire still completes the interval at the right wall-clock time
@@ -53,9 +52,16 @@ export function PomodoroTimer({ taskId, durationsSeconds }: PomodoroTimerProps) 
 
       // This interval just finished naturally.
       const finishedKind = kind;
-      const finishedStartedAt = startedAt ?? new Date();
       const finishedDurationSeconds = durationsSeconds[finishedKind];
       const finishedEndedAt = new Date(deadline);
+      // Derived from the deadline, not a `startedAt ?? new Date()`
+      // fallback — `startedAt` is always set alongside `deadline` (see
+      // handleStart/the interval-transition branch below), so the
+      // fallback was unreachable in practice, but it would have built
+      // a payload apps/api is guaranteed to reject (ended - started
+      // ≈ 0 while duration_seconds is the full interval) had it ever
+      // fired (round-6 REVIEW finding).
+      const finishedStartedAt = new Date(deadline - finishedDurationSeconds * 1000);
 
       if (finishedKind === "work") {
         // AC6/AC7 — only a completed work interval reaches here, never
@@ -88,18 +94,16 @@ export function PomodoroTimer({ taskId, durationsSeconds }: PomodoroTimerProps) 
 
       setCompletedWorkIntervals(newCompletedWorkIntervals);
       setKind(next.kind);
-      setStartedAt(nextStartedAt);
       setDeadline(nextStartedAt.getTime() + durationsSeconds[next.kind] * 1000);
       setRemainingSeconds(durationsSeconds[next.kind]);
     }, 1000);
 
     return () => clearInterval(id);
-  }, [running, deadline, kind, completedWorkIntervals, startedAt, durationsSeconds, taskId]);
+  }, [running, deadline, kind, completedWorkIntervals, durationsSeconds, taskId]);
 
   function handleStart() {
     const now = new Date();
     setRecordError(null);
-    setStartedAt(now);
     setDeadline(now.getTime() + durationsSeconds.work * 1000);
     setRemainingSeconds(durationsSeconds.work);
     setRunning(true);
@@ -111,7 +115,6 @@ export function PomodoroTimer({ taskId, durationsSeconds }: PomodoroTimerProps) 
     setRunning(false);
     setKind("work");
     setRemainingSeconds(durationsSeconds.work);
-    setStartedAt(null);
     setDeadline(null);
   }
 

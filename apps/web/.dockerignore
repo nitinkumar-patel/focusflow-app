@@ -2,3 +2,7 @@ node_modules
 .next
 .git
 *.log
+# The builder stage does COPY . . — without this, a developer's local
+# .env.local would be baked into the image (round-6 REVIEW Nit).
+.env*
+!.env.example

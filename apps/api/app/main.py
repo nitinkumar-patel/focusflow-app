@@ -17,7 +17,17 @@ from app.tasks.router import router as tasks_router
 # Fail closed before the app object even exists — see AC19.
 settings.fail_closed_on_missing_secrets()
 
-app = FastAPI(title="FocusFlow internal API")
+app = FastAPI(
+    title="FocusFlow internal API",
+    # Every other route requires X-Internal-Secret; FastAPI's own
+    # /docs, /redoc, and /openapi.json don't carry that dependency and
+    # can't easily be given one, so they're disabled instead (round-6
+    # REVIEW Nit) — anything on the Compose network could otherwise
+    # read the full API shape.
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 
 @app.exception_handler(RequestValidationError)

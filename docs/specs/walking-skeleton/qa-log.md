@@ -242,3 +242,50 @@ Before the fix this would have returned apps/api's raw `detail`
 `{"ok":false,"error":"Something went wrong. Try again."}` with no
 trace of the raw detail string anywhere in the response body. Test
 user, task, and session deleted afterward.
+
+## Round 6 (quality-engineer + security-reviewer) — 2026-08-18
+
+Both specialist reviewers ran for the first time against the whole
+implementation (not a prior round's fix diff) once the adversarial-
+reviewer converged to Clean. Findings and fixes are summarized in
+plan.md's Changelog; this section records the live verification.
+
+**Docker rebuild surfaced a real, unrelated bug**: adding a non-root
+`USER` + a `healthcheck:` to `apps/web`'s container (a quality-engineer
+fix) made the container report unhealthy even though the Next.js
+server itself logged "Ready". Diagnosed live: Next.js's standalone
+`server.js` binds to `process.env.HOSTNAME`, which Docker auto-sets to
+the container's short id (not an address) — so the server accepted
+connections addressed to that specific container IP (reachable from
+other containers via the `web` service name, confirmed via
+`docker compose exec api python3 -c "urllib.request.urlopen('http://web:3000/healthz')"`
+→ 200) but not `127.0.0.1`/`localhost` from inside the same container,
+which is exactly what the new healthcheck used. Fixed with
+`ENV HOSTNAME=0.0.0.0` in `apps/web/Dockerfile`; confirmed the
+healthcheck then passes and `nginx` (which now waits on `web`'s health
+before starting) comes up.
+
+- **Non-root containers**: `docker compose exec api id` → `uid=999
+  (appuser)`; `docker compose exec web id` → `uid=1001(nextjs)`.
+- **Security headers**: `curl -sI http://localhost/signup` shows
+  `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+  `Referrer-Policy: strict-origin-when-cross-origin`, and `Server:
+  nginx` with no version number (`server_tokens off`).
+- **FastAPI docs disabled**: `urllib.request.urlopen('http://localhost:8000/docs')`
+  from inside the `api` container → `404`.
+- **The X-Forwarded-Proto Blocker fix, the one that mattered most**:
+  signed up normally (no forwarded-proto header) — session cookie came
+  back `authjs.session-token=…; HttpOnly; SameSite=lax`, correctly
+  *not* `Secure` on genuine plaintext HTTP. Signed up again with
+  `-H "X-Forwarded-Proto: https"` (simulating the outer TLS proxy
+  AC20's guide recommends) — session cookie came back
+  `__Secure-authjs.session-token=…; Secure; HttpOnly; SameSite=lax`,
+  confirming Auth.js now honors the forwarded proto instead of the
+  previously-hardcoded `$scheme` (always `http`, since this Nginx has
+  no TLS listener).
+- **Regression check**: full signup → task-creation → analytics
+  journey through Nginx still works end to end; the AC17 rate-limit
+  burst test (10 rapid `GET /login`) still returns 6× `200` then 4×
+  `429`, unaffected by the new `map` block or security headers.
+
+All test users/tasks/sessions from this pass deleted afterward.

@@ -61,3 +61,23 @@ async def test_empty_title_422(client: AsyncClient) -> None:
 async def test_missing_user_id_401(client: AsyncClient) -> None:
     response = await client.get("/tasks", headers=SECRET_HEADER)
     assert response.status_code == 401
+
+
+async def test_malformed_user_id_401(client: AsyncClient) -> None:
+    # require_user_id's UUID-parse branch (round-6 REVIEW finding: only
+    # the absent-header case was covered — a refactor that returned the
+    # raw header value without parsing it kept every other test green).
+    response = await client.get(
+        "/tasks", headers={**SECRET_HEADER, "X-User-Id": "not-a-uuid"}
+    )
+    assert response.status_code == 401
+
+
+async def test_unknown_user_id_401(client: AsyncClient) -> None:
+    # require_user_id's existence-lookup branch — a well-formed UUID
+    # that names no row must still 401, not be accepted as a forged
+    # identity (spec AC16).
+    response = await client.get(
+        "/tasks", headers={**SECRET_HEADER, "X-User-Id": str(uuid.uuid4())}
+    )
+    assert response.status_code == 401
