@@ -180,4 +180,30 @@ describe("apiFetch", () => {
       expect(JSON.stringify(call)).not.toContain(marker);
     }
   });
+
+  // Pins the warn/error split itself (round-9 REVIEW nit: reverting the
+  // 401-on-non-/auth/-path carve-out back to the blanket "4xx is routine"
+  // rule left every existing test passing — nothing asserted on call
+  // counts by level, so the carve-out had no test that could fail).
+  it("logs a 401 on a non-/auth/ path at error, and a 401 on /auth/ at warn", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ detail: "unauthorized" }), { status: 401 }),
+    );
+    await apiFetch("/tasks");
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).not.toHaveBeenCalled();
+
+    errorSpy.mockClear();
+    warnSpy.mockClear();
+
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ detail: "invalid credentials" }), { status: 401 }),
+    );
+    await apiFetch("/auth/verify");
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
 });

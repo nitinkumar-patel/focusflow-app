@@ -324,8 +324,7 @@ Verified live against a full clean rebuild (`docker compose down` then
   zone's leaky-bucket state carrying across `/signup` and `/login`
   requests in the same test session — expected, not a regression).
 
-## Round 8 (three-way re-review, X-Forwarded-Proto reviewer
-disagreement resolved) — 2026-08-18
+## Round 8 (three-way re-review, X-Forwarded-Proto reviewer disagreement resolved) — 2026-08-18
 
 Two of three specialist reviewers disputed round 7's X-Forwarded-Proto
 fix (matching the *last* comma-element); adversarial-reviewer
@@ -361,7 +360,5 @@ longer waits on a real 5s timer), `npm run build`; the corrected
 files, all pass) and a negative case (a scratch file with two exported
 actions and only one `await auth()` call, correctly fails); a full
 signup→task→analytics journey through Nginx.
-
-All test users/tasks/sessions from this pass deleted afterward.
 
 All test users/tasks/sessions from this pass deleted afterward.

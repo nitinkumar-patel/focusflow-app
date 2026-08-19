@@ -84,9 +84,14 @@ jobs:
             # Per-action, not per-file (round-8 REVIEW fix): a file
             # exporting N actions with only one `await auth()` anywhere
             # in it used to pass — this requires at least as many
-            # guard calls as exported actions.
-            actions="$(grep -c '^export async function' "$f")"
-            guards="$(grep -c 'await auth()' "$f")"
+            # guard calls as exported actions. Both patterns cover
+            # `export async function` and `export const x = async`
+            # action styles. `|| true` on both (round-9 REVIEW fix):
+            # grep -c exits 1 on a zero count, which under bash -e
+            # would abort the step at this assignment instead of
+            # reaching the comparison below.
+            actions="$(grep -cE '^export (async function|const [A-Za-z0-9_]+ = async)' "$f" || true)"
+            guards="$(grep -c 'await auth()' "$f" || true)"
             if [ "$guards" -lt "$actions" ]; then
               echo "fewer await auth() calls ($guards) than exported actions ($actions): $f"
               fail=1
