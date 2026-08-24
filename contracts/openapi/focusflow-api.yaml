@@ -110,7 +110,20 @@ components:
 
   responses:
     Unauthorized:
-      description: Missing or invalid X-Internal-Secret, or unknown user.
+      description: >
+        Missing/invalid X-Internal-Secret, missing/malformed/unknown
+        X-User-Id, or (on POST /auth/verify only) a wrong password or
+        unknown email. `detail` is one of three fixed strings
+        apps/web's api-client.ts depends on to tell these apart:
+        `"invalid internal secret"` — require_internal_secret
+        (app/core/security.py), a missing, empty, or mismatched
+        X-Internal-Secret — always a broken web<->api deployment, never
+        a user mistake. `"unauthorized"` — require_user_id
+        (app/core/security.py), an absent, malformed, or unknown
+        X-User-Id — routine. `"invalid credentials"` — POST
+        /auth/verify only (app/auth/router.py), a wrong password or
+        unknown email — routine. apps/web's logFailure currently
+        discriminates only the first from the other two.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }

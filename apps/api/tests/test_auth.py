@@ -89,6 +89,15 @@ async def test_missing_internal_secret_401(client: AsyncClient) -> None:
         json={"email": "grace@example.com", "password": "correct horse battery staple"},
     )
     assert response.status_code == 401
+    # round-17 REVIEW finding: apps/web's logFailure discriminates a
+    # broken web<->api deployment from a routine 401 entirely on this
+    # exact detail string (apps/web/lib/api-client.ts). Pinning it here
+    # only catches an api-side rename landing without an update to this
+    # test — it can't catch the two sides drifting apart together (e.g.
+    # this string renamed here *and* in api-client.ts to a different,
+    # still-matching value); the canonical cross-service contract is
+    # contracts/openapi/focusflow-api.yaml's Unauthorized response.
+    assert response.json()["detail"] == "invalid internal secret"
 
 
 async def test_empty_internal_secret_rejected(client: AsyncClient) -> None:
@@ -98,6 +107,19 @@ async def test_empty_internal_secret_rejected(client: AsyncClient) -> None:
         headers={"X-Internal-Secret": ""},
     )
     assert response.status_code == 401
+    assert response.json()["detail"] == "invalid internal secret"
+
+
+async def test_wrong_internal_secret_401(client: AsyncClient) -> None:
+    # round-17 REVIEW finding: require_internal_secret's hmac.compare_digest
+    # mismatch branch (as opposed to missing/empty) had no test at all.
+    response = await client.post(
+        "/auth/register",
+        json={"email": "ivan@example.com", "password": "correct horse battery staple"},
+        headers={"X-Internal-Secret": "not the real secret"},
+    )
+    assert response.status_code == 401
+    assert response.json()["detail"] == "invalid internal secret"
 
 
 async def test_no_password_in_logs_or_responses(

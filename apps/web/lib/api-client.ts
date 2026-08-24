@@ -16,26 +16,18 @@ interface ApiFetchOptions {
 }
 
 // console.error/console.warn, never console.log with the body/headers
-// attached — method + path + status + cause only (round-6 REVIEW
-// finding: every apiFetch failure previously vanished silently;
-// `docker compose logs web` is the read-ground-truth command per
-// reference.md and had nothing to show for a failed signup, task
-// create, or session record). A 4xx is logged at warn — a wrong
-// password or a duplicate signup is an expected, routine outcome, not
-// an operational problem to page on (round-7 REVIEW nit) — except a
-// 401 on anything other than an `/auth/*` path, which apps/api only
-// ever returns for a missing/mismatched X-Internal-Secret
-// (apps/api/app/core/security.py's require_internal_secret) — i.e. a
-// broken web<->api deployment, not a user mistake, and every request
-// fails the same way (round-8 REVIEW nit: this used to log at warn
-// alongside routine 401s from `/auth/verify`, burying the one signal
-// an operator could grep for during a total outage).
+// attached — method + path + status + cause only. A 4xx is routine
+// (warn) except a 401 whose `detail` is exactly "invalid internal
+// secret" — apps/api only ever returns that from require_internal_secret
+// (apps/api/app/core/security.py), i.e. a broken web<->api deployment,
+// not a user mistake — which logs at error. Full round-by-round history
+// of this carve-out (why detail-based rather than path-based, why this
+// exact string) is in docs/specs/walking-skeleton/plan.md's changelog
+// (rounds 6-8, 16, 17), not restated here.
 function logFailure(method: string, path: string, status: number | undefined, cause: unknown) {
+  const isInternalSecretMismatch = status === 401 && cause === "invalid internal secret";
   const isRoutine =
-    status !== undefined &&
-    status >= 400 &&
-    status < 500 &&
-    !(status === 401 && !path.startsWith("/auth/"));
+    !isInternalSecretMismatch && status !== undefined && status >= 400 && status < 500;
   const log = isRoutine ? console.warn : console.error;
   log(`apiFetch ${method} ${path} failed`, { status, cause: String(cause) });
 }

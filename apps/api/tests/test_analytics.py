@@ -156,6 +156,52 @@ async def test_by_day_buckets_in_utc(client: AsyncClient) -> None:
     assert yesterday_bucket["minutes"] == 1.0
 
 
+async def test_by_day_buckets_in_utc_even_when_db_session_timezone_is_not(
+    non_utc_client: AsyncClient,
+) -> None:
+    # round-16 REVIEW finding: test_by_day_buckets_in_utc above only ever
+    # ran against the default (UTC) session timezone, so router.py's
+    # func.timezone("UTC", ...) normalization was untested — replacing it
+    # with a bare func.date(started_at) kept that test green. This drives
+    # the same scenario through a session forced to Pacific/Kiritimati
+    # (UTC+14), where a missing normalization would shift bucket dates.
+    #
+    # round-17 REVIEW finding: `datetime.now(UTC) - 60s` only crosses a
+    # Kiritimati calendar-date boundary when the UTC hour is >= 10, so the
+    # first version of this test was fail-open for 10 of every 24 hours.
+    # Pin both sessions to 23:00 UTC — Kiritimati (UTC+14) is always past
+    # local midnight by then, so the UTC and Kiritimati dates unconditionally
+    # differ — anchored a day in the past so app/tasks/router.py's
+    # CLOCK_SKEW_TOLERANCE_SECONDS future-ended_at check can't reject it.
+    client = non_utc_client
+    user_id = await _register_user(client, "analytics-non-utc-session@example.com")
+    task_id = await _create_task(client, user_id, "Task")
+
+    # Named for what they are (fixed UTC clock-date anchors), not
+    # "today"/"yesterday" — round-17 REVIEW nit: both anchors are in the
+    # past relative to `now`, and neither is "today" in either calendar.
+    anchor_day_started_at = (datetime.now(UTC) - timedelta(days=1)).replace(
+        hour=23, minute=0, second=0, microsecond=0
+    )
+    prior_day_started_at = anchor_day_started_at - timedelta(days=1)
+
+    await _record_session(client, user_id, task_id, prior_day_started_at, 60)
+    await _record_session(client, user_id, task_id, anchor_day_started_at, 60)
+
+    response = await client.get(
+        "/analytics/focus-time", params={"days": 7}, headers=_headers(user_id)
+    )
+    body = response.json()
+    anchor_day_bucket = next(
+        b for b in body["by_day"] if b["date"] == anchor_day_started_at.date().isoformat()
+    )
+    prior_day_bucket = next(
+        b for b in body["by_day"] if b["date"] == prior_day_started_at.date().isoformat()
+    )
+    assert anchor_day_bucket["minutes"] == 1.0
+    assert prior_day_bucket["minutes"] == 1.0
+
+
 async def test_days_param_bounds_the_window(client: AsyncClient) -> None:
     user_id = await _register_user(client, "analytics-days-bound@example.com")
     response = await client.get(

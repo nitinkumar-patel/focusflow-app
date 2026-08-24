@@ -38,11 +38,18 @@ def verify_password(raw: str, hashed: str) -> bool:
 
 async def require_internal_secret(x_internal_secret: str | None = Header(default=None)) -> None:
     """Rejects when either side is unset/empty — an empty-to-empty
-    comparison must never authorize."""
+    comparison must never authorize.
+
+    detail is deliberately distinct from require_user_id's "unauthorized"
+    (round-17 REVIEW finding: apps/web's api-client.ts logFailure uses this
+    detail string to distinguish a broken web<->api deployment from a
+    routine unknown/malformed user id — a shared string made that
+    discriminator false).
+    """
     if not x_internal_secret or not settings.internal_api_secret:
-        raise HTTPException(status_code=401, detail="unauthorized")
+        raise HTTPException(status_code=401, detail="invalid internal secret")
     if not hmac.compare_digest(x_internal_secret, settings.internal_api_secret):
-        raise HTTPException(status_code=401, detail="unauthorized")
+        raise HTTPException(status_code=401, detail="invalid internal secret")
 
 
 async def require_user_id(

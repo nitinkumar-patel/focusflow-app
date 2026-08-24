@@ -112,6 +112,10 @@ export function PomodoroTimer({ taskId, durationsSeconds }: PomodoroTimerProps) 
   function handleStop() {
     // Clears the countdown without recording anything (AC6) — resets
     // to a fresh work interval regardless of what was running.
+    // round-16 REVIEW nit: completedWorkIntervals is deliberately left
+    // untouched — stopping mid-cycle doesn't undo the work intervals
+    // already completed and recorded, so restarting still counts toward
+    // the 4th-interval long break (AC5) rather than resetting the cycle.
     setRunning(false);
     setKind("work");
     setRemainingSeconds(durationsSeconds.work);

@@ -270,7 +270,10 @@ before starting) comes up.
 - **Security headers**: `curl -sI http://localhost/signup` shows
   `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
   `Referrer-Policy: strict-origin-when-cross-origin`, and `Server:
-  nginx` with no version number (`server_tokens off`).
+  nginx` with no version number (`server_tokens off`). Round 16 added
+  `Content-Security-Policy: base-uri 'self'; form-action 'self';
+  frame-ancestors 'none'` — confirmed live via the same `curl -D-`
+  (see Round 16 below).
 - **FastAPI docs disabled**: `urllib.request.urlopen('http://localhost:8000/docs')`
   from inside the `api` container → `404`.
 - **The X-Forwarded-Proto Blocker fix, the one that mattered most**:
@@ -360,5 +363,408 @@ longer waits on a real 5s timer), `npm run build`; the corrected
 files, all pass) and a negative case (a scratch file with two exported
 actions and only one `await auth()` call, correctly fails); a full
 signup→task→analytics journey through Nginx.
+
+All test users/tasks/sessions from this pass deleted afterward.
+
+## Round 9 (quality-engineer) — 2026-08-19
+
+2 Concerns + 2 Nits against round 8's diff:
+
+- **CI grep fail-open on zero match**: `ci.yml`'s AC16 step ran bare
+  `grep -c` for both `actions=` and `guards=` counts — `grep -c` exits
+  1 (not just 2) when the count is zero, which under `bash -e` aborted
+  the step at the assignment instead of reaching the `-lt` comparison.
+  Guarded both with `|| true` so a zero count reaches the comparison
+  and fails with a readable message instead of an opaque script abort.
+  Also widened the `actions=` pattern itself to match `export const x
+  = async` in addition to `export async function`, the other action
+  style already used elsewhere in the codebase.
+- **401 log-level split had no test covering both branches**: round 8
+  added an `error`-vs-`warn` carve-out for a 401 on a non-`/auth/` path
+  (signals a broken `X-Internal-Secret`) vs. a routine `/auth/` 401,
+  but no test exercised both call shapes. Added a test asserting the
+  call-count split directly.
+- Nits: joined a two-line qa-log.md round-8 heading onto one line;
+  removed a duplicate trailing line.
+
+Verified against the real Docker Compose stack after rebuild: `ruff`,
+48 api tests, 45 web tests, `lint`, `tsc`, `build` all clean; the
+X-Forwarded-Proto fix re-confirmed live across all 5 disputed cases via
+`/api/auth/csrf`.
+
+All test users/tasks/sessions from this pass deleted afterward.
+
+## Round 10 (adversarial-reviewer, full-diff pass) — 2026-08-19
+
+1 Blocker + 4 Concerns + 4 Nits against the full implementation diff
+(43bed1f..HEAD, 97 files):
+
+- **Blocker — round 9's own fix reopened the fail-closed invariant**:
+  `|| true` on `actions=` alone means a file the grep pattern can't
+  recognize yields `actions=0`, and `0 -lt 0` is false — the step now
+  silently *passes* a file with zero recognized action exports and
+  zero guards, the same "check can't see it → must fail closed" defect
+  rounds 7-8 fixed twice already. Verified locally: a `"use server"`
+  file with an unrecognized export style produced `actions=0 guards=0
+  fail=0` (wrongly passes) before this round's fix, and `fail=1`
+  (correctly fails, with a "pattern may be stale" message) after.
+  Fixed by adding an explicit `[ "$actions" -eq 0 ]` failure branch
+  ahead of the `-lt` comparison.
+- Concerns: `spec.md`/`plan.md` Status fields left at
+  `Implementing`/`Executing` though all ACs are checked — flip to
+  `Shipped`/`Done` deferred to the finish commit, once this round's
+  re-review is clean; round 9 had no qa-log.md or plan.md changelog
+  entry (only the commit message) — added above; the seven items
+  explicitly deferred (five from round 6's security-reviewer pass, two
+  from round 7's quality-engineer pass) lived only in plan.md prose,
+  with `workspace.toml [backlog].open` empty — added slugs, sources,
+  and summaries for all seven.
+- Nits: AC11's grep corpus covered only `apps/web/app/(auth)`, missing
+  `apps/web/app/(app)/`, `proxy.ts`, and `scripts/` — widened to all of
+  `apps/web/app` plus those two paths (verified zero false positives
+  against the current tree); `config.py`'s `_build_database_url`
+  comment still cited the round-1 `env_file:`-specific explanation
+  after round 3 corrected the reasoning in plan.md — restated to
+  match (round 11 found this restated reasoning itself false and
+  retracted it — see the Round 11 section below); `apps/api/uv.lock`
+  was untracked and unread by any build step
+  (`pip`, not `uv`, installs deps) — deleted; the changelog's `[0.1.0]`
+  entry was dated 2026-08-17, two days before work actually finished —
+  redating deferred to the finish commit alongside the Status flip.
+
+Verified: `ruff`, api pytest, `lint`, `tsc`, web vitest, `npm run
+build` all clean after the CI-workflow and comment fixes (workflow
+syntax and grep-corpus changes confirmed by direct shell reproduction
+of both the positive and negative cases, since GitHub Actions itself
+doesn't run locally).
+
+All test users/tasks/sessions from this pass deleted afterward.
+
+## Round 11 (adversarial-reviewer, fix-verification) — 2026-08-20
+
+1 Blocker + 3 Concerns + 3 Nits against round 10's fixes:
+
+- **Blocker — round 10's `.env` interpolation claim is false**: the
+  comment added to `config.py`/`plan.md` said a `.env` file's own
+  values aren't recursively interpolated within that same file.
+  Reproduced live: `docker compose config` (v5.1.4) with
+  `POSTGRES_PASSWORD=s3cr3t` and `DATABASE_URL=...${POSTGRES_PASSWORD}`
+  both in `.env` renders the fully-expanded URL — via `env_file:` and
+  via `environment:`. Retracted the claim; restated the real reason
+  (no combined `DATABASE_URL` var is ever shipped, so the password has
+  one canonical home).
+- Concerns: `workspace.toml`'s comments cited a nonexistent `plan.md
+  T-security` task — repointed at the real round-6/round-7 changelog
+  entries; the two quality-engineer backlog items were mislabeled
+  round-6, should be round-7 — relabeled in `workspace.toml` and here;
+  the seven backlog entries still classified `unsupported_legacy`
+  under `workspace_status.py reconcile` even with `summary`/`needs`
+  present — added an acknowledgment comment describing this as
+  expected (round 12 found that comment's stated mechanism wrong and
+  replaced the actual fix — see below).
+- Nits: Round 8's closing line had gone missing (orphaned/duplicated
+  at EOF after Round 10) — restored it in place, removed the
+  duplicate; the Round 9 record above only mentioned the `|| true`
+  guard, not the `export const x = async` pattern widening the same
+  commit made — added; the AC16 zero-action failure message printed
+  the filename twice — fixed.
+
+Verified: `ruff`, 48 api tests (container rebuilt), `lint`, `tsc`
+clean; `lint-spec-status.py --root .` clean.
+
+All test users/tasks/sessions from this pass deleted afterward.
+
+## Round 12 (adversarial-reviewer, fix-verification) — 2026-08-20
+
+0 Blockers + 3 Concerns + 0 Nits against round 11's fixes:
+
+- Round 11's `workspace.toml` acknowledgment comment claimed the seven
+  backlog entries render `unsupported_legacy` because none has a
+  target spec/plan artifact yet ("no `path` to register") — false;
+  adding `path` alone doesn't change the classification (the
+  accepted-legacy shape needs the exact 5-field set `{slug, source,
+  summary, needs, type}` with `type = "spec"`, per
+  `workspace_status_engine.py`). Fixed by adding `type = "spec"` to
+  each of the seven entries and rewriting the comment to describe the
+  real mechanism.
+- Round 11 itself had no changelog/qa-log record (the same defect
+  round 10 raised about round 9, reopened one round later) — added the
+  Round 11 section above and a matching `plan.md` changelog entry.
+- The interpolation-claim retraction was tagged "round-10 REVIEW
+  correction" in `plan.md`, though round 11 is what found and
+  retracted it — retagged "round-11 REVIEW correction".
+
+Verified: `ruff`, api pytest, `lint`, `tsc` clean (api/web code
+unchanged since round 11, only docs/config); `lint-spec-status.py`
+clean; `workspace.toml` re-parsed with `tomllib` (7 entries, all
+fields present) and `workspace_status.py reconcile` re-run to confirm
+all seven now classify `legacy_entry`, not `unsupported_legacy`.
+
+All test users/tasks/sessions from this pass deleted afterward.
+
+## Round 13 (adversarial-reviewer, fix-verification) — 2026-08-20
+
+2 Concerns + 1 Nit against round 12's fixes — all record-keeping; no
+further findings against `ci.yml` or `config.py` (unchanged since
+round 11):
+
+- Round 12 itself had no changelog/qa-log entry, and the Round 11
+  entries in both files misattributed the `type = "spec"` fix to round
+  11 (it was round 12's fix) — corrected the Round 11 entries and
+  added this Round 12 entry above (and to `plan.md`).
+- `workspace.toml`'s comment cited "CONVENTIONS.md § 4" for the legacy
+  5-field backlog shape, but § 4 only defines the `slug`-matching
+  deferral-token contract, not the 5-field shape — repointed at
+  `.claude/skills/workspace-status/SKILL.md § 1a` (`legacy_entry`
+  row), keeping the § 4 reference scoped to `slug`.
+- Nit: this file's Round 10 entry still asserted the `.env`
+  interpolation reasoning round 11 retracted, without a pointer to the
+  retraction (only `plan.md`'s copy had one) — added the same pointer
+  here.
+
+Verified: `workspace.toml` re-parsed with `tomllib`; `reconcile`
+re-run, still zero `unsupported_legacy`; `lint-spec-status.py` clean.
+
+All test users/tasks/sessions from this pass deleted afterward.
+
+## Round 14 (adversarial-reviewer, fix-verification) — 2026-08-20
+
+0 Blockers + 1 Concern + 0 Nits against round 13's fixes. Confirmed
+the one-round-behind changelog pattern is broken: round 12 and round
+13 both now have entries in `plan.md` and here, and the reviewer
+cross-checked them against the actual diffs and found them accurate.
+
+- `workspace.toml`'s round-13 citation
+  (`.claude/skills/workspace-status/SKILL.md § 1a`) named the right
+  classification code (`legacy_entry`) but not the field-set contract
+  — § 1a documents only that the code is non-dispatchable/
+  informational, not the 5-field shape. Repointed the comment at the
+  actual shape definition, `workspace_status_engine.py:993-1015`
+  (`_accepted_legacy_entry`'s `backlog.open` branch), keeping the
+  `SKILL.md § 1a` pointer for what it does document.
+
+Verified: `workspace.toml` re-parsed with `tomllib`; `reconcile`
+re-run, still zero `unsupported_legacy`.
+
+All test users/tasks/sessions from this pass deleted afterward.
+
+## Round 15 — 2026-08-20
+
+adversarial-reviewer returned `Clean — ready to commit.` against round
+14's fix. No findings, no changes. This satisfied the mandatory
+adversarial requirement, triggering the whole-spec specialist pass
+(quality-engineer + security-reviewer, dispatched in parallel) —
+Round 16 below.
+
+## Round 16 (quality-engineer + security-reviewer, whole-spec pass) — 2026-08-20
+
+1 Blocker + 9 Concerns + 5 Nits combined — the first real
+application-code findings since round 11 (rounds 12-14 were pure
+record-keeping). Both reviewers independently caught the same gap:
+`db` never got `restart: unless-stopped` (round 6 added it to
+api/web/nginx and left a comment on `api` falsely claiming `db` was
+already covered).
+
+**Applied:**
+
+- **Blocker**: AC2's login half had zero test coverage. Added
+  `apps/web/app/(auth)/login/actions.test.ts` (missing-fields
+  rejection, `signIn` call shape, `AuthError` → generic message,
+  non-`AuthError` rethrow) — verified red against a broken mapping
+  before confirming green. Then live-drove the real flow through
+  nginx: created a test user directly via `apps/api`'s
+  `/auth/register` (`docker compose exec api python3` — no `curl` in
+  the slim image), then hit `/api/auth/csrf` +
+  `/api/auth/callback/credentials` through nginx twice — correct
+  password: `302`, session cookie set (`authjs.session-token` present
+  in the cookie jar); wrong password: `302` to
+  `/login?error=CredentialsSignin&code=credentials`, no session
+  cookie. Browser extension wasn't available in this session, so this
+  substituted for a UI-driven click-through — the same NextAuth
+  `authorize()` code path `loginAction`'s `signIn()` call reaches.
+- `db`'s restart policy (above) — confirmed via `docker inspect
+  focusflow-app-db-1 --format '{{.HostConfig.RestartPolicy.Name}}'` →
+  `unless-stopped` after `docker compose up -d --build`.
+- The `INTERNAL_API_SECRET`-mismatch signal logged at `warn` on
+  `/auth/*` — exactly where it hits first — because the carve-out was
+  path-based. Switched to detail-based (`cause === "unauthorized"` —
+  superseded by round 17, which replaced this with
+  `"invalid internal secret"`; see Round 17 below) in `api-client.ts`;
+  rewrote the pinning test to cover `/auth/register` too, not just
+  `/tasks` vs `/auth/verify`.
+- `check_db_connection`'s log line had no failing test — added one,
+  verified red against a reverted `logger.exception` call before
+  confirming green (50 api tests, was 48).
+- `test_by_day_buckets_in_utc` only ran against the default UTC
+  session timezone. Added a `non_utc_client` conftest fixture (`SET
+  TIME ZONE 'Pacific/Kiritimati'`) and a matching test — verified red
+  against a bare `func.date(started_at)` (yesterday's bucket read 0.0
+  instead of 1.0) before confirming green.
+- No CSP anywhere — added `base-uri 'self'; form-action 'self';
+  frame-ancestors 'none'` to `nginx.conf` — confirmed live via `curl
+  -D- http://localhost/login | grep -i content-security-policy` after
+  rebuild.
+- AC16's CI loop still failed open on a non-numeric `grep -c` capture
+  — added an explicit `case` guard on both counts, verified locally
+  (unreadable-count branch fires; the three existing action-shape
+  cases from round 15 still behave correctly).
+- `handleStop`'s silent `completedWorkIntervals` preservation —
+  commented (deliberate: doesn't undo already-completed work
+  intervals, so restarting still counts toward the 4th-interval long
+  break).
+- `dockerfile-runtime-stage-absent`'s backlog summary understated its
+  consequence — reworded in `workspace.toml`.
+
+**Deferred** (design-scope; added to `workspace.toml
+[backlog].open`): the AC5/AC6 `revalidatePath`-re-render join has no
+test against a live mid-cycle timer; CI never runs a real `docker
+compose up` + HTTP smoke test (AC10 and the X-Forwarded-Proto
+protection rest on this file's hand-run curl tables); `apps/api`'s
+unpinned dependencies have no committed lockfile (the `apps/api/uv.lock`
+deleted at round 10 as unreferenced would, in hindsight, have closed a
+real gap — but restoring it needs an actual switch to lockfile-based
+installs, not just un-deleting the file); `apiFetch`'s `logFailure`
+can log a fragment of a submitted email address via some
+`email_validator` rejection reasons, needing an apps/api-side design
+call (a custom validation-error handler), not a client-side guess.
+
+Verified: full stack rebuilt (`docker compose up -d --build`); `ruff`,
+50 api tests, `lint`, `tsc`, 49 web tests, `npm run build` all clean;
+CSP header and the real login flow (both outcomes) re-confirmed live
+post-rebuild; `workspace.toml` re-parsed with `tomllib` (11 entries)
+and `reconcile` re-run, all classify `legacy_entry`.
+
+All test users/tasks/sessions from this pass deleted afterward.
+
+## Round 17 (adversarial re-review of round 16's own fixes, two passes) — 2026-08-21
+
+Round 16's fixes went through a fresh adversarial pass; that pass found
+1 Blocker + 5 Concerns + 4 Nits, mostly missing test coverage for round
+16's own new behavior and doc-drift the round-16 entry itself
+introduced. Fixing those triggered a second adversarial pass, which
+found 1 more Blocker + 5 Concerns + 4 Nits of the same shape. Full list
+in `plan.md`'s round-17 changelog entry; QA-relevant verification below.
+
+- **The non-UTC analytics test was fail-open for ~42% of run hours**:
+  it used `datetime.now(UTC) - 60s`, which only crosses the
+  Kiritimati/UTC calendar-date boundary when the UTC hour is >= 10.
+  Reproduced live: reverted `router.py`'s `func.timezone("UTC", ...)`
+  to a bare `func.date(started_at)` and ran the test with the old
+  `- 60s` anchor at a UTC hour < 10 — passed against the broken code.
+  Re-ran with the round-17 fix (both sessions pinned to 23:00 UTC) —
+  failed red against the same broken code (the `yesterday` bucket came
+  back `0.0` instead of `1.0`, since a 23:00 UTC session lands in the
+  *next* Kiritimati calendar day). Restored the real fix — green.
+- **`require_internal_secret`'s wrong-secret branch had no coverage,
+  and apps/web's discriminator string had no api-side test**: added
+  `test_wrong_internal_secret_401` plus a `detail` assertion on all
+  three internal-secret tests. Reverted `security.py`'s
+  `"invalid internal secret"` back to `"unauthorized"` — all three
+  failed red with a clear string-mismatch diff. Restored — 11/11
+  `test_auth.py` tests green.
+- **The `"invalid internal secret"` detail, live**: `docker compose
+  exec api python3 -c "..."` posting to `/auth/register` with
+  `X-Internal-Secret: wrong` → `401 {"detail":"invalid internal
+  secret"}`, confirmed against the running container post-rebuild.
+- **CI grep-guard rewrites (AC11, AC21 steps)**: both steps in
+  `ci.yml` previously fail-opened on a `grep` error (exit 2) the same
+  way the AC16 step did before its round-16 fix. Simulated locally with
+  `bash -eo pipefail`: (1) clean-repo pass case — both steps exit 0
+  with no output; (2) injected a nonexistent path into each grep's
+  argument list — both steps now print "grep failed unexpectedly (exit
+  2)" and exit 1, instead of silently passing; (3) injected an actual
+  violation (a `console.log` template string with `password`, and a
+  literal `"*"` in a mock `allowedOrigins`) — both steps correctly
+  detect it and exit 1.
+- **`handleStop`'s cycle-position invariant**: `PomodoroTimer.test.tsx`'s
+  new test — start, complete one work interval, stop mid-way through
+  the second, restart, complete three more — lands on a long break at
+  the 4th completion. Injected `setCompletedWorkIntervals(0)` into
+  `handleStop` — the same scenario landed on a short break instead
+  (red); reverted the injection — long break, as expected (green).
+- **Regression check**: `/healthz` → `{"status":"ok"}`; CSP header
+  still present via `curl -sI /signup`; `db`/`api` restart policies
+  still `unless-stopped` via `docker inspect`.
+
+Verified: full stack rebuilt (`docker compose up -d --build`); `ruff`,
+51 api tests (was 50), `lint`, `tsc`, 50 web tests (was 49), `npm run
+build` all clean.
+
+All test users/tasks/sessions from this pass deleted afterward.
+
+### Pass 3 (third adversarial review of round 17's own fixes)
+
+Found 0 Blockers, 3 Concerns, 3 Nits — no Blocker after two prior
+passes each found one, taken as convergence. Full list in `plan.md`'s
+round-17 changelog Pass 3 addendum; QA-relevant verification below.
+
+- **AC21 CI step's multi-line blind spot**: the pass-2 rewrite still
+  missed a wildcard on a line *after* the `allowedOrigins`/`trustHost`
+  match. Reproduced: wrote a throwaway
+  `allowedOrigins: [\n  "*",\n]` (multi-line) into a scratch file
+  outside the repo and ran the pass-2 grep against it — passed (no `*`
+  on the matched line itself). Ran the pass-3 `-A3` version against the
+  same scratch file — caught it. Re-ran all three cases (clean repo,
+  the multi-line violation, a simulated grep error) with the final
+  version — all three still behave correctly.
+- **`AC23` added for the security-header set** — `spec.md`'s
+  Acceptance Criteria now name it explicitly; previously the whole
+  header block in `nginx.conf` could be deleted without failing any
+  criterion.
+- **OpenAPI contract updated**: `contracts/openapi/focusflow-api.yaml`'s
+  `Unauthorized` response now documents both `detail` values
+  (`"invalid internal secret"` vs `"unauthorized"`) as the canonical
+  cross-service reference, since three independent code locations
+  (api, web, and each side's tests) now depend on the exact strings
+  matching.
+- **Regression check**: `/healthz` → `{"status":"ok"}`; CSP header
+  still present via `curl -sI /signup`.
+
+Verified: full stack rebuilt (`docker compose up -d --build`); `ruff`,
+51 api tests, `lint`, `tsc`, 50 web tests — counts unchanged from pass 2
+(pass 3's fixes were doc/CI/contract-only) — `npm run build` all clean.
+`git status` confirms `test_db_session.py` and
+`apps/web/app/(auth)/login/actions.test.ts` are now staged (were
+untracked since round 16/pass 1).
+
+All test users/tasks/sessions from this pass deleted afterward.
+
+### Pass 4 (fourth adversarial review of round 17's own fixes)
+
+Found 1 Blocker + 3 Concerns + 3 Nits — the Blocker was in pass 3's own
+new OpenAPI contract text, and two Concerns were regressions in pass
+3's own AC21 CI-step rewrite. Full list in `plan.md`'s round-17
+changelog Pass 4 addendum; QA-relevant verification below.
+
+- **`/auth/verify` returns a third `detail` string the new OpenAPI
+  text denied existed**: confirmed in `apps/api/app/auth/router.py:76,79`
+  — `"invalid credentials"`, not `"unauthorized"` — and confirmed it's
+  the endpoint `$ref`ing `Unauthorized` (`focusflow-api.yaml:227`).
+  Rewrote the contract description to list all three `detail` values
+  with their real source files.
+- **AC21 CI step's `-A3` window missed a wildcard 6 lines past the
+  matched line**: reproduced with a throwaway scratch file
+  (`allowedOrigins: [...5 lines of unrelated entries..., "*", ]`) —
+  the pass-3 `-A3` version passed it (wildcard outside the 3-line
+  window); the pass-4 file-level version (`grep -F -e '"*"' -e
+  "'*'"` over the whole file) caught it.
+- **AC21 CI step's fail-closed-on-empty-corpus regression, fixed**:
+  reproduced pass 3's `test -d apps/web` bug directly — pointed the
+  step at a scratch `apps/web` directory containing only an unrelated
+  file (no `allowedOrigins`/`trustHost` anywhere) and confirmed the
+  pass-3 version passed silently; added `test -n "$files"` and
+  confirmed the same scratch scenario now fails closed.
+- **AC21 CI step, all four cases re-verified after both fixes**: clean
+  repo (pass), the far multi-line wildcard (fail), the empty-corpus
+  case (fail), and a simulated grep error on a nonexistent path (fail)
+  — all four correct.
+- **Regression check**: `/healthz` → `{"status":"ok"}`; all five
+  Nginx response headers (`X-Content-Type-Options`, `X-Frame-Options`,
+  `Referrer-Policy`, `Content-Security-Policy`, and no `Server` version
+  string) reconfirmed via `curl -sI /signup` against the rebuilt stack.
+
+Verified: full stack rebuilt (`docker compose up -d --build`); `ruff`,
+51 api tests, `lint`, `tsc`, 50 web tests, `npm run build` all clean
+(counts unchanged — pass 4's fixes were doc/CI/contract-only).
 
 All test users/tasks/sessions from this pass deleted afterward.

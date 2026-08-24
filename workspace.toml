@@ -19,5 +19,38 @@
 # repository root.
 
 [backlog]
-open = []
+# The entries below use the accepted-legacy 5-field backlog object
+# shape (slug, source, summary, needs, type = "spec") — the exact field
+# set is defined at workspace_status_engine.py:993-1015
+# (_accepted_legacy_entry's backlog.open branch: `set(raw) ==
+# {"slug","source","summary","needs","type"}` with `type == "spec"`),
+# not the canonical target-entry shape (path, kind, source, summary,
+# needs) from the header above. No artifact path exists for any of
+# these yet ("would need its own follow-up spec" per plan.md); the
+# `slug` values themselves resolve the deferral-token contract in
+# CONVENTIONS.md § 4. `workspace_status.py reconcile` classifies this
+# shape `legacy_entry` (SKILL.md § 1a: "Supported compatibility form;
+# visible but never dispatchable") rather than
+# `unsupported_legacy`, verified round-12 REVIEW.
+open = [
+  # Deferred from walking-skeleton round-6 security-reviewer pass (see
+  # plan.md's round-6 changelog entry, 2026-08-18): production-hardening
+  # scope beyond the skeleton's stated ACs, each needs its own spec.
+  { slug = "walking-skeleton-least-privileged-db-role", source = "spec/walking-skeleton security-reviewer Concern#4", summary = "App connects to Postgres as the DB superuser instead of a least-privileged role", needs = [], type = "spec" },
+  { slug = "walking-skeleton-tasks-pagination-quotas", source = "spec/walking-skeleton security-reviewer Concern#5", summary = "No pagination or per-user quotas on GET /tasks and task creation", needs = [], type = "spec" },
+  { slug = "walking-skeleton-nginx-default-server-catchall", source = "spec/walking-skeleton security-reviewer Concern#8", summary = "No nginx default-server catch-all block backing trustHost: true's Host-header assumption", needs = [], type = "spec" },
+  { slug = "walking-skeleton-auth-url-pin-public-origin", source = "spec/walking-skeleton security-reviewer Nit#10", summary = "AUTH_URL not pinned to the public origin; internal container hostnames could leak into NextAuth redirect URLs", needs = [], type = "spec" },
+  { slug = "walking-skeleton-structured-auth-event-logging", source = "spec/walking-skeleton security-reviewer Nit#15", summary = "No structured per-user auth-event logging or bounded Docker log retention (real audit trail)", needs = [], type = "spec" },
+  # Deferred from walking-skeleton round-7 quality-engineer pass (see
+  # plan.md's round-7 changelog entry, 2026-08-18).
+  { slug = "walking-skeleton-check-db-connection-log-format", source = "spec/walking-skeleton quality-engineer round-7", summary = "check_db_connection's log formatting isn't routed through uvicorn's handler config", needs = [], type = "spec" },
+  { slug = "walking-skeleton-dockerfile-runtime-stage-absent", source = "spec/walking-skeleton quality-engineer round-7", summary = "apps/api's Dockerfile has no separate runtime build stage, so docker-compose.yml's target: dev ships pytest/ruff/httpx/tests/ to every self-hosted deployment, and that dev image is what container-scan measures as if it were production", needs = [], type = "spec" },
+  # Deferred from walking-skeleton round-16 (quality-engineer +
+  # security-reviewer whole-spec pass, 2026-08-20) — design-scope items,
+  # not mechanical fixes; each would need its own follow-up spec.
+  { slug = "walking-skeleton-pomodoro-revalidate-rerender-join-test", source = "spec/walking-skeleton quality-engineer Concern#6", summary = "recordSessionAction's revalidatePath re-renders the /tasks page the running PomodoroTimer lives on; no test exercises that re-render against a live mid-cycle timer, so a state-loss regression on the AC5/AC6 join would go undetected", needs = [], type = "spec" },
+  { slug = "walking-skeleton-ci-compose-smoke-test", source = "spec/walking-skeleton quality-engineer Concern#7", summary = "CI never runs docker compose up + a real HTTP smoke test against nginx/healthz; AC10 and the X-Forwarded-Proto regression protection (rounds 6-8) rest entirely on qa-log.md's hand-run curl table, not a gate", needs = [], type = "spec" },
+  { slug = "walking-skeleton-python-deps-unpinned", source = "spec/walking-skeleton security-reviewer Concern#2", summary = "apps/api's dependencies are version-ranged with no committed lockfile, so the built image and CI's pip-audit resolve independently and a compromised transitive dependency can land silently on a rebuild with no diff to review", needs = [], type = "spec" },
+  { slug = "walking-skeleton-auth-error-detail-log-leak", source = "spec/walking-skeleton security-reviewer Nit#4", summary = "apiFetch's logFailure logs apps/api's raw error detail verbatim; some email_validator rejection reasons on /auth/register can embed a fragment of the submitted address into docker compose logs web — needs a design call on the apps/api side (a custom validation-error handler for email fields), not a client-side truncation", needs = [], type = "spec" },
+]
 closed = []

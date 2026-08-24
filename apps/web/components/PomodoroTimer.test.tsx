@@ -110,6 +110,65 @@ describe("PomodoroTimer", () => {
     expect(screen.queryByRole("button", { name: /start focus session/i })).not.toBeNull();
   });
 
+  // round-17 REVIEW nit: handleStop's comment asserts completedWorkIntervals
+  // is deliberately preserved across a stop (so a restart still counts
+  // toward the 4th-interval long break), but nothing exercised that
+  // invariant — `setCompletedWorkIntervals(0)` in handleStop would pass
+  // every other test. This stops mid-cycle after one real completion,
+  // restarts, and drives three more completions to the 4th, asserting the
+  // long break (not a 4th short break) still lands there.
+  it("preserves the completed-work-interval count across a mid-cycle stop and restart", async () => {
+    render(<PomodoroTimer taskId="11111111-1111-4111-8111-111111111111" durationsSeconds={durationsSeconds} />);
+
+    // Work interval 1 completes fully -> short break, count = 1. The cycle
+    // auto-continues through breaks (no re-click needed) until stopped.
+    fireEvent.click(screen.getByRole("button", { name: /start focus session/i }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(screen.queryByText(/Short break:/)).not.toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(screen.queryByText(/Focus:/)).not.toBeNull();
+
+    // Work interval 2 stopped halfway through — no completion, count stays 1.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    fireEvent.click(screen.getByRole("button", { name: /stop/i }));
+    expect(recordSessionAction).toHaveBeenCalledTimes(1);
+
+    // Restart (single click — the cycle auto-continues from here through
+    // breaks, as above) and complete three more full work intervals (2, 3, 4).
+    fireEvent.click(screen.getByRole("button", { name: /start focus session/i }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(screen.queryByText(/Short break:/)).not.toBeNull();
+    expect(recordSessionAction).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(screen.queryByText(/Short break:/)).not.toBeNull();
+    expect(recordSessionAction).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+    // The 4th completed work interval — if the stop had silently reset
+    // the count, this would be a short break, not long.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(screen.queryByText(/Long break:/)).not.toBeNull();
+    expect(recordSessionAction).toHaveBeenCalledTimes(4);
+  });
+
   it("completes the interval on wall-clock time even if fewer ticks fired than seconds elapsed", async () => {
     // Simulates a throttled background tab: the browser skips most
     // setInterval callbacks, but real time has still passed. A

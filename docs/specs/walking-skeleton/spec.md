@@ -28,7 +28,7 @@ machine from nothing but the repo (AC15) — ADR-0001's whole premise. Because
 this walking skeleton is also the first real exposure of an auth system to
 the public internet (self-hosted, no platform-level protections to lean on),
 it carries the baseline hardening a live login system needs — not just the
-happy path (AC16-AC22). No aesthetic-direction document is grounded for this
+happy path (AC16-AC23). No aesthetic-direction document is grounded for this
 repo yet (see Assumptions); AC13 stands in for a taste critique as this
 spec's design-intent bar.
 
@@ -190,9 +190,18 @@ spec's design-intent bar.
   must fail to serve traffic (T1).
 - **Nginx forwards the headers Server Actions and NextAuth need, and
   never wildcards allowed-origins** (AC21): goal-based — a curl through
-  Nginx asserting the forwarded headers reach `web` (T1), plus a grep of
-  `next.config.ts` (Server Actions' `allowedOrigins` option) and the
-  NextAuth config for a literal `*` in `allowedOrigins`/`trustHost`.
+  Nginx asserting the forwarded headers reach `web` (T1), plus a CI step
+  that finds every file under `apps/web` mentioning `allowedOrigins`
+  (Server Actions) or `trustHost` (NextAuth) and checks each whole file
+  for a quoted `*` literal — not line-scoped, so a wildcard anywhere in
+  a matching file is caught regardless of how far it sits from the
+  option name.
+- **Baseline security response headers on every response** (AC23):
+  goal-based — a `curl -sI` through Nginx in T14 asserts each header is
+  present with its configured value, recorded each round in
+  `qa-log.md`; not yet wired into CI (tracked as
+  `walking-skeleton-ci-compose-smoke-test` in
+  `workspace.toml [backlog].open`, round-17 REVIEW finding).
 - **A CI workflow runs a secret scanner, SCA for both ecosystems, and a
   container scan** (AC22): goal-based — the workflow file exists,
   declares the three scanner steps, and is structurally valid (this
@@ -324,6 +333,14 @@ spec's design-intent bar.
 - [x] AC22: A CI workflow exists that runs a secret scanner, a dependency
       vulnerability scan for both ecosystems (`npm audit` or equivalent,
       `pip-audit`), and a container image scan, on every push/PR.
+- [x] AC23: Nginx adds `X-Content-Type-Options: nosniff`,
+      `X-Frame-Options: DENY`, `Referrer-Policy:
+      strict-origin-when-cross-origin`, and a `Content-Security-Policy`
+      (`base-uri 'self'; form-action 'self'; frame-ancestors 'none'`)
+      to every response, and hides its version (`server_tokens off`,
+      no `Server` version string). These are this spec's canonical
+      values, the same way AC5 is canonical for interval lengths —
+      `apps/nginx/nginx.conf` implements them, it doesn't own them.
 
 ## Assumptions
 
@@ -372,11 +389,12 @@ spec's design-intent bar.
 - Product: the analytics view renders a bar chart (focus minutes per day,
   last 7 days) plus a per-task minutes breakdown, not a plain list only
   (source: user confirmation 2026-08-13).
-- Product: this spec includes baseline security hardening (AC16-AC22 —
+- Product: this spec includes baseline security hardening (AC16-AC23 —
   session/authorization provenance, rate limiting, session lifecycle,
-  fail-closed secrets, a TLS warning, forwarded-header correctness, and a
-  CI scanning pipeline) rather than deferring it to a follow-up spec,
-  because this is the first exposure of a real login system to the
+  fail-closed secrets, a TLS warning, forwarded-header correctness, a
+  CI scanning pipeline, and baseline security response headers) rather
+  than deferring it to a follow-up spec, because this is the first
+  exposure of a real login system to the
   public internet with no platform-level protections to lean on (source:
   user confirmation 2026-08-14, after a security-reviewer pass found
   these gaps at spec stage). TLS termination itself, full session

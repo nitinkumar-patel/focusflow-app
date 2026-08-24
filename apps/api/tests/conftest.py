@@ -108,3 +108,26 @@ async def client() -> AsyncGenerator[AsyncClient]:
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
     app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def non_utc_client() -> AsyncGenerator[AsyncClient]:
+    # round-16 REVIEW finding: analytics' by_day bucketing is supposed to
+    # normalize to UTC "regardless of the DB session's timezone setting"
+    # (app/analytics/router.py's own comment), but every existing test ran against the
+    # default session, which is already UTC — the invariant was asserted
+    # in prose, never exercised. Pacific/Kiritimati (UTC+14) is the
+    # furthest-from-UTC real zone, chosen so a bucketing bug can't
+    # coincidentally still land on the right date.
+    from app.main import app
+
+    async def _override_non_utc_session() -> AsyncGenerator[AsyncSession]:
+        async with test_session_factory() as session:
+            await session.execute(text("SET TIME ZONE 'Pacific/Kiritimati'"))
+            yield session
+
+    app.dependency_overrides[get_db_session] = _override_non_utc_session
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+    app.dependency_overrides.clear()

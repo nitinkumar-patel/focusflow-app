@@ -185,14 +185,35 @@ describe("apiFetch", () => {
   // 401-on-non-/auth/-path carve-out back to the blanket "4xx is routine"
   // rule left every existing test passing — nothing asserted on call
   // counts by level, so the carve-out had no test that could fail).
-  it("logs a 401 on a non-/auth/ path at error, and a 401 on /auth/ at warn", async () => {
+  // round-16 REVIEW fix: the carve-out is now detail-based, not
+  // path-based (a desynced X-Internal-Secret locks out /auth/register
+  // and /auth/login first, both under /auth/, so a path-based carve-out
+  // missed the case it exists for) — asserts the "invalid internal
+  // secret" detail logs at error regardless of path, and any other 401
+  // detail stays routine regardless of path too.
+  // round-17 REVIEW fix: this only ever asserted the routine case on an
+  // /auth/ path (/auth/verify), which the *old* path-based rule also
+  // routed to warn — the half of the change that actually altered
+  // behavior (a routine 401 on /tasks, previously error, now warn) had
+  // no assertion; a third case below covers it.
+  it("logs a 401 with detail 'invalid internal secret' at error on any path, and any other 401 detail at warn", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     global.fetch = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ detail: "unauthorized" }), { status: 401 }),
+      new Response(JSON.stringify({ detail: "invalid internal secret" }), { status: 401 }),
     );
     await apiFetch("/tasks");
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).not.toHaveBeenCalled();
+
+    errorSpy.mockClear();
+    warnSpy.mockClear();
+
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ detail: "invalid internal secret" }), { status: 401 }),
+    );
+    await apiFetch("/auth/register");
     expect(errorSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy).not.toHaveBeenCalled();
 
@@ -203,6 +224,16 @@ describe("apiFetch", () => {
       new Response(JSON.stringify({ detail: "invalid credentials" }), { status: 401 }),
     );
     await apiFetch("/auth/verify");
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy).not.toHaveBeenCalled();
+
+    errorSpy.mockClear();
+    warnSpy.mockClear();
+
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ detail: "unauthorized" }), { status: 401 }),
+    );
+    await apiFetch("/tasks");
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(errorSpy).not.toHaveBeenCalled();
   });

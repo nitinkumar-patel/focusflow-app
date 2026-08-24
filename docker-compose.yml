@@ -12,6 +12,14 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    # round-6 REVIEW finding: no service restarted on crash or came back
+    # after a host reboot — a self-hosted deliverable (AC15) needs both.
+    # round-16 REVIEW fix: `db` itself was missed and never got a
+    # restart policy (round 6's comment on `api`, below, claimed `db`
+    # was already covered — it wasn't, at any commit), so a host reboot
+    # left the database down forever while api/web/nginx crash-looped
+    # against it.
+    restart: unless-stopped
 
   api:
     build:
@@ -27,10 +35,11 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    # round-6 REVIEW finding: no service but `db` restarted on crash or
-    # came back after a host reboot — a self-hosted deliverable (AC15)
-    # needs both. stdlib-only healthcheck (no curl/wget in the slim
-    # image) so it costs nothing to add.
+    # round-6 REVIEW finding: no service restarted on crash or came back
+    # after a host reboot — a self-hosted deliverable (AC15) needs both
+    # (see `db`'s restart-policy comment above for the round-16 gap this
+    # left). stdlib-only healthcheck (no curl/wget in the slim image) so
+    # it costs nothing to add.
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]

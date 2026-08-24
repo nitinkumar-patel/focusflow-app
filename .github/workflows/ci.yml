@@ -62,11 +62,26 @@ jobs:
       # Each step now asserts its target paths exist before grepping.
       - name: No password in logs or template strings (AC11, web half)
         run: |
-          test -d "apps/web/app/(auth)"
+          test -d apps/web/app
           test -d apps/web/components
           test -d apps/web/lib
-          ! grep -rnE 'console\.[a-z]+\([^)]*password|\$\{[^}]*password' \
-            "apps/web/app/(auth)" apps/web/components apps/web/lib
+          test -f apps/web/proxy.ts
+          test -d apps/web/scripts
+          # round-17 REVIEW fix: `! grep` can't distinguish "no match"
+          # (exit 1, the pass case) from a grep-side error like an
+          # unreadable file (exit 2) — both look like "nothing found" to
+          # `!`, the same class of gap the AC16 step's `case` guard below
+          # already closed. Capture the real exit code instead.
+          matches="$(grep -rnE 'console\.[a-z]+\([^)]*password|\$\{[^}]*password' \
+            apps/web/app apps/web/components apps/web/lib apps/web/proxy.ts apps/web/scripts)" && rc=0 || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            echo "$matches"
+            echo "found password in a log call or template string"
+            exit 1
+          elif [ "$rc" -ne 1 ]; then
+            echo "grep failed unexpectedly (exit $rc)"
+            exit 1
+          fi
       - name: Every mutating Server Action verifies its session (AC16)
         run: |
           test -d 'apps/web/app/(app)'
@@ -92,6 +107,21 @@ jobs:
             # reaching the comparison below.
             actions="$(grep -cE '^export (async function|const [A-Za-z0-9_]+ = async)' "$f" || true)"
             guards="$(grep -c 'await auth()' "$f" || true)"
+            # round-16 REVIEW fix: an unreadable/vanished file between the
+            # grep -rl scan and here makes grep -c exit 2 with an empty
+            # capture, which fails both numeric comparisons below silently
+            # (bash treats a failed test as "skip", not "fail") — catch a
+            # non-numeric capture explicitly before comparing.
+            case "$actions" in ''|*[!0-9]*) echo "unreadable action count for $f"; fail=1; continue;; esac
+            case "$guards" in ''|*[!0-9]*) echo "unreadable guard count for $f"; fail=1; continue;; esac
+            # A file matched by the "use server" scan above but with zero
+            # recognized action exports means the pattern above is stale for
+            # this file, not that it has nothing to guard (round-10 REVIEW
+            # fix: `|| true` alone let actions=0 silently pass 0 -lt 0).
+            if [ "$actions" -eq 0 ]; then
+              echo "no recognized exported Server Action in $f (pattern may be stale)"
+              fail=1
+            fi
             if [ "$guards" -lt "$actions" ]; then
               echo "fewer await auth() calls ($guards) than exported actions ($actions): $f"
               fail=1
@@ -100,10 +130,40 @@ jobs:
           exit "$fail"
       - name: No wildcard allowedOrigins/trustHost (AC21)
         run: |
-          test -f apps/web/next.config.ts
-          test -f apps/web/lib/auth.ts
-          ! grep -rn 'allowedOrigins\|trustHost' apps/web/next.config.ts apps/web/lib/auth.ts \
-            | grep -q '\*'
+          test -d apps/web
+          # round-17 REVIEW fix (pass 5): two more gaps, both in pass 4's
+          # own rewrite. (1) `grep -F -e '"*"' -e "'*'"` (pass 4) matched
+          # only the exact two-quote-one-star literal, missing Next.js's
+          # documented wildcard-subdomain form (`"*.example.com"`,
+          # `"https://*"`) — spec.md's Never-do covers any wildcard, not
+          # just a bare `"*"`. Broadened to any quoted literal containing
+          # `*` (an opening quote/backtick, non-quote characters, then
+          # `*`, with no closing-quote requirement so it isn't
+          # string-boundary-fragile). (2) the inner per-file loop (pass
+          # 4) treated a grep error (exit 2 — an unreadable/vanished
+          # file) the same as "no match" (exit 1) — the identical class
+          # of gap the outer corpus scan two blocks up already guards
+          # against. Capturing the inner grep's exit code the same way
+          # closes it.
+          files="$(grep -rlE 'allowedOrigins|trustHost' apps/web \
+            --exclude-dir=node_modules --exclude-dir=.next)" && rc=0 || rc=$?
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+            echo "grep failed unexpectedly (exit $rc)"
+            exit 1
+          fi
+          test -n "$files"
+          fail=0
+          while IFS= read -r f; do
+            grep -Eq "[\"'\`][^\"'\`]*\\*" "$f" && frc=0 || frc=$?
+            if [ "$frc" -eq 0 ]; then
+              echo "found a wildcard allowedOrigins/trustHost in $f"
+              fail=1
+            elif [ "$frc" -ne 1 ]; then
+              echo "grep failed unexpectedly on $f (exit $frc)"
+              fail=1
+            fi
+          done <<< "$files"
+          exit "$fail"
 
   test-api:
     name: Test (api)

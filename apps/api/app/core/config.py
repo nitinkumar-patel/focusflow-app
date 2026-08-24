@@ -11,10 +11,10 @@ import sys
 
 
 def _build_database_url(dbname: str, user: str, password: str) -> str:
-    # Built from parts, never a single DATABASE_URL env var: `env_file:`
-    # entries are literal KEY=VALUE pairs with no ${VAR} substitution, so
-    # a combined URL referencing ${POSTGRES_PASSWORD} would pass the
-    # literal placeholder text to the container instead of the real value.
+    # Built from parts, never a single DATABASE_URL env var: no combined
+    # DATABASE_URL is ever shipped, so the password has exactly one
+    # canonical home (POSTGRES_PASSWORD) instead of two values that could
+    # drift apart (see plan.md T1 for the full history).
     return f"postgresql+asyncpg://{user}:{password}@db:5432/{dbname}"
 
 
