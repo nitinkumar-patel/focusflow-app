@@ -1,9 +1,11 @@
 #!/usr/bin/env python
 """loop-engine — work-loop phase FSM validator (Phase 1, Option A).
 
-Validates legal phase ordering, runs read-only guards, and records the
-current phase in engine-state.json. Does NOT invoke loop-cohort mutations.
-The skill invokes all mutations explicitly.
+Validates legal phase ordering, runs guards, and records the current phase in
+engine-state.json. For the closed ADR-0125 registry it invokes cohort effects
+through loop-cohort.py before committing engine state; loop-cohort.py remains
+the cohort writer of record. Other cohort mutations remain explicit skill
+calls.
 
 Two modes in Phase 1:
   code       — full ten-state lifecycle with implementation waves
@@ -30,9 +32,11 @@ from __future__ import annotations
 import argparse
 import contextlib
 import functools
+import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -41,6 +45,7 @@ import tempfile
 import uuid as _uuid_mod
 from datetime import UTC, datetime
 from pathlib import Path
+from types import ModuleType
 
 # Windows cp1252 guard — reconfigure stdout/stderr to UTF-8 before any print.
 sys.stdout.reconfigure(encoding="utf-8", errors="strict")
@@ -48,11 +53,11 @@ sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
-# ── the lock-hold budget (ADR-0074 / spec AC10) ────────────────────────────
+# ── the lock-hold budget (ADR-0074) ─────────────────────────────────────────
 #
-# `cmd_transition` holds the state lock across git-shelling guards. Three
-# numbers are ONE budget, and breaking the ordering silently reinstates the
-# lost update this lock exists to prevent:
+# `cmd_transition` holds the state lock across a read-decide-write section. Three
+# numbers are ONE budget, and breaking the ordering silently reinstates the lost
+# update this lock exists to prevent:
 #
 #     statelock timeout (10s)  <  max hold  <  statelock stale_after (300s)
 #
@@ -60,18 +65,61 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # live holder. `stale_after` must exceed one, or a merely-slow holder is judged
 # dead, its lock is reclaimed, and a second writer is admitted.
 #
-# max hold = SUBPROCESS_TIMEOUT_S x MAX_SUBPROCESS_CALLS_UNDER_LOCK
-#          = 20 x 6 = 120s, comfortably inside 300s.
+# THE BUDGET IS IN TWO HALVES, and saying so is the point — the previous version of
+# this comment implied one number bounded everything, which stopped being true the
+# moment the guards moved in-process.
 #
-# Bounding every call is what makes the hold provable rather than hoped-for.
-# test-loop-concurrency.py's budget case walks this module's locked call graph
-# and fails if a subprocess call appears without a `timeout=`, so adding a guard
-# cannot quietly break the arithmetic.
+# 1. The SUBPROCESS half is time-bounded:
+#
+#        max hold = SUBPROCESS_TIMEOUT_S x MAX_SUBPROCESS_CALLS_UNDER_LOCK
+#                 = 20 x 2 = 40s, comfortably inside 300s.
+#
+#    The constant counts INVOCATION EDGES on the reachable call graph, not call
+#    sites. There is exactly ONE `subprocess.run` site under the lock — inside
+#    `_get_repo_root` — reached along two edges from `cmd_transition`: once via its
+#    own `_resolve_spec_dir`, once directly. The `_locked` decorator's
+#    `_resolve_spec_dir` runs BEFORE `sl.exclusive()` and is deliberately not
+#    counted. It was 6 before the guards moved in-process, which was a conservative
+#    bound over a measured maximum of five.
+#
+# 2. The IN-PROCESS half is byte-bounded, NOT time-bounded. Every file the guard
+#    layer reads goes through `read_managed_json` / `read_managed_text`, capped at
+#    8 MiB, and `canonical_contract` costs roughly 0.14 s/MiB — so about 1.0 s at
+#    the cap. Guard calls are function calls and are deliberately NOT counted as
+#    subprocesses; counting them would make the arithmetic describe something it
+#    does not measure.
+#
+#    A byte cap bounds bytes, not seconds. `O_NONBLOCK` closes the reachable local
+#    case — a FIFO or device swapped in after the type pre-check, which would
+#    otherwise block `os.open` forever — but a stalled network mount can still block
+#    `os.read`, and `_recover_pending` reads repo-global state under this same lock.
+#    That residual is ACCEPTED and named rather than papered over: its only recovery
+#    is the stale-lock reclaim, which is itself the hazard this budget exists to
+#    prevent. There is no stdlib way to bound a blocking read without threads or
+#    signals, and adding either under the lock would be a worse trade.
+#
+# `test_loop_concurrency.py`'s budget case derives all of this from source: it walks
+# the locked call graph, fails if a subprocess call appears without a `timeout=`,
+# fails if this constant disagrees with the edge count, and fails if the inequality
+# breaks. Adding a guard cannot quietly break the arithmetic.
 SUBPROCESS_TIMEOUT_S = 20.0
-MAX_SUBPROCESS_CALLS_UNDER_LOCK = 6
+MAX_SUBPROCESS_CALLS_UNDER_LOCK = 2
+
+# The engine-side cohort-lock hold's own ceiling — the only hold this module
+# creates inside another. Its origin, because a bound without one is a guess:
+# the hold reaches no subprocess (the budget case asserts that from source), so
+# it is three local file operations — one read bounded by the guard layer's
+# 8 MiB cap, one small `events.pending` write, and one mkstemp+replace. A
+# second below is two orders above measured local I/O for that work.
+#
+# The inequality that matters here runs the OTHER way from the engine lock's.
+# `timeout < maximum hold` exists so a contender does not abandon a live holder
+# of a long outer hold; this inner hold must instead finish BELOW
+# `_statelock.DEFAULT_TIMEOUT`, or a contending cohort verb times out against a
+# holder that was about to release.
+COHORT_COMMIT_HOLD_MAX_S = 1.0
 SCHEMA_VERSION = 1
 _LOOP_RUN_DIR_NAME = ".loop-run"
-_MAX_MANAGED_JSON_BYTES = 8 * 1024 * 1024
 
 # Environment variables that could redirect git to a foreign repo root.
 _GIT_OVERRIDE_VARS = frozenset({
@@ -88,24 +136,79 @@ _GIT_OVERRIDE_VARS = frozenset({
 # ── repo-root helper ───────────────────────────────────────────────────────
 
 
+# Control-character neutralisation for the engine's own diagnostics.
+#
+# A DELIBERATE second copy of `_loop_guards._CONTROL_ESCAPES`, and the duplication is
+# the point: these warnings fire on paths where the guard module may be unavailable or
+# unloadable, which is exactly when a diagnostic matters most. Reaching through
+# `_guards()` here would make the sanitiser fail in the case it exists for.
+#
+# Not cosmetic. `_recover_engine_state_tmp` interpolates a filename that comes from a
+# `glob()`, under the same planted-file threat model it already accepts for the file's
+# CONTENT — so a `.engine-state-<ESC>[2J<ESC>[31mFAKE-OK.json.tmp` emitted a real
+# screen-clear and colour change into the stream a supervising agent captures.
+_CONTROL_ESCAPES = str.maketrans({c: f"\\x{c:02x}" for c in [*range(32), 127]})
+
+
+def _diag(text: object) -> str:
+    """One-line, control-character-safe text for a warning or refusal."""
+    return " ".join(str(text).split()).translate(_CONTROL_ESCAPES)
+
+
+# Resolved repository roots, keyed on the process working directory.
+#
+# `git rev-parse --show-toplevel` below takes no `cwd=`, so the working directory
+# is what decides its answer for any caller here. Keying on it, rather than
+# caching unconditionally, is what makes this safe in the pack's own harnesses:
+# they load this module by path, in-process, and chdir between throwaway
+# repositories. An unkeyed cache would hand the second repository the first one's
+# root, and that reaches `_resolve_spec_dir`'s confinement check as a silent wrong
+# answer rather than a crash.
+#
+# Successes only. A remembered failure would turn one transient timeout into a
+# permanent refusal for the life of the process, and would buy nothing — the
+# failure path already ends the run. Re-spawning on failure also leaves the
+# lock-hold arithmetic describing what it always did.
+_REPO_ROOT_CACHE: dict[str, Path] = {}
+
+
 def _get_repo_root() -> Path:
-    safe_env = {k: v for k, v in os.environ.items() if k not in _GIT_OVERRIDE_VARS}
     try:
+        # Inside the `try` deliberately: `Path.cwd()` raises FileNotFoundError
+        # when the working directory has been unlinked, and the contract below is
+        # that this function leaves only by ValueError.
+        cwd = str(Path.cwd())
+        cached = _REPO_ROOT_CACHE.get(cwd)
+        if cached is not None:
+            return cached
+        # Built after the cache check, so a hit does not pay for a filtered copy
+        # of the whole environment it never uses.
+        safe_env = {k: v for k, v in os.environ.items() if k not in _GIT_OVERRIDE_VARS}
         r = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
             capture_output=True, text=True, encoding="utf-8", check=False,
             env=safe_env, timeout=SUBPROCESS_TIMEOUT_S,
         )
-    except subprocess.TimeoutExpired as exc:
-        # Raised as ValueError because every caller already handles that; a bare
-        # TimeoutExpired would surface as a traceback.
-        raise ValueError(
-            f"git rev-parse --show-toplevel timed out after "
-            f"{SUBPROCESS_TIMEOUT_S:.0f}s"
-        ) from exc
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        # Raised as ValueError because every caller already handles that: every
+        # verb reaches this through `_resolve_spec_dir`, whose caller catches only
+        # ValueError, and `main()` catches only GuardsUnavailable/KeyboardInterrupt.
+        # Anything else here is a 33-line traceback that also prints absolute
+        # internal script paths — more output than an entire successful run.
+        #
+        # The class, not one member of it. An earlier fix listed FileNotFoundError
+        # alone, which left `PATH` holding a *directory* named `git`
+        # (PermissionError, also an OSError) reproducing the defect unchanged at
+        # 2,221 chars. `lint-knowledge.py` and `lint-traceability.py` already
+        # bound this same `git` call by OSError. TimeoutExpired stays listed
+        # because it is a SubprocessError, not an OSError. UnicodeDecodeError
+        # needs no clause: it is already a ValueError subclass.
+        raise ValueError(f"could not determine repo root: {exc}") from exc
     if r.returncode != 0 or not r.stdout.strip():
         raise ValueError("could not determine repo root (git rev-parse --show-toplevel failed)")
-    return Path(r.stdout.strip()).resolve()
+    root = Path(r.stdout.strip()).resolve()
+    _REPO_ROOT_CACHE[cwd] = root
+    return root
 
 
 # ── loop-run path helpers ───────────────────────────────────────────────────
@@ -123,71 +226,299 @@ def _events_pending_path(repo_root: Path) -> Path:
     return _loop_run_dir(repo_root) / "events.pending"
 
 
+# ── lifecycle fields on the event line ─────────────────────────────────────
+#
+# A consumer that reads only the event log cannot otherwise answer three
+# questions: how long the phase being left actually took, whether this
+# transition waived a retry cap, and how close the run is to its retry caps.
+# The retry counters live in the cohort state file and no transition moves
+# them, so they are read here and copied onto the line rather than inferred.
+#
+# Every helper below is best-effort by contract: a field it cannot determine
+# becomes `None`, and no failure here may cost a transition. The caller relies
+# on that, because the line is built before the write path's own guard.
+
+_BUDGET_FIELDS = (
+    "implementation_retry_count",
+    "max_implementation_retries",
+    "review_retry_count",
+    "max_review_retries",
+)
+
+# What the gate decided. How many attempts a run has taken is not recorded
+# here: counting the events already gives it, and a per-line count would be a
+# second home for a fact this log can already answer.
+#
+# The values are drawn from the OpenTelemetry CI/CD convention's result
+# vocabulary rather than invented, so a consumer that already reads pipeline
+# telemetry needs no translation for this field.
+_GATE_RESULTS = {
+    "reviewers-clean": "success",
+    "spec-approved": "success",
+    "plan-approved": "success",
+    "gates-clean": "success",
+    "done": "success",
+    "findings-remain": "failure",
+    "spec-rejected": "failure",
+    "plan-rejected": "failure",
+    "gates-failed": "failure",
+    "blocker-applied": "failure",
+}
+
+
+def _phase_duration_s(phase_started_at: str | None, now: str) -> int | None:
+    """Whole seconds between two engine timestamps, or None if either is unusable.
+
+    Never negative: a clock stepping backwards mid-run would otherwise emit a
+    duration that any summing consumer reads as a real measurement.
+    """
+    if not phase_started_at:
+        return None
+    try:
+        started = datetime.strptime(phase_started_at, "%Y-%m-%dT%H:%M:%SZ")
+        ended = datetime.strptime(now, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return None
+    return max(int((ended - started).total_seconds()), 0)
+
+
+def _budget_snapshot(spec_dir: Path) -> dict:
+    """Copy retry counts when recorded and retry caps with enforced defaults.
+
+    Always returns all keys. A consumer checking whether a run is near its cap
+    must be able to tell an absent count from zero. Caps differ: an absent cap
+    still has the guard layer's enforced default, so reporting None would hide
+    the cap a consumer needs to assess.
+    """
+    snapshot: dict[str, int | None] = dict.fromkeys(_BUDGET_FIELDS)
+    try:
+        cohort = _read_managed_json(spec_dir / "state.json", "state.json")
+    except Exception:
+        return snapshot
+    for field in _BUDGET_FIELDS:
+        if field.startswith("max_"):
+            guards = _guards()
+            value = guards.non_negative_int(cohort, field, guards.DEFAULTS[field])
+        else:
+            value = cohort.get(field)
+        if isinstance(value, int) and not isinstance(value, bool):
+            snapshot[field] = value
+    return snapshot
+
+
+# Cohort-state identity across a transition commit.
+#
+# Spec: docs/specs/wave-exit-verdict-serialisation/spec.md.
+#
+# Four sentinels, not three. `ManagedContentError` subclasses `ValueError`
+# (`_loop_guards.py`), and the guard layer reports a non-regular file, an
+# unopenable one and one replaced mid-read as a BARE `ValueError` — the same
+# type `json.loads` raises for an integer literal over 4300 digits. Exception
+# type alone therefore cannot separate "could not read it" from "read it, it
+# was rubbish", so the `lstat` below supplies that discriminator. Collapsing
+# the two lets a `state.json` broken one way at the capture and the other way
+# at the re-read compare EQUAL, which admits the commit this guard exists to
+# refuse.
+#
+# Each value is prefixed so disjointness from the sha256 hex space is a
+# property of the value rather than an authoring intention.
+_FP_ABSENT = "cohort-state:absent"
+_FP_NONREGULAR = "cohort-state:not-a-regular-file"
+_FP_CONTENT_UNUSABLE = "cohort-state:content-unusable"
+_FP_OTHER_UNUSABLE = "cohort-state:unusable"
+
+
+def _cohort_fingerprint(spec_dir: Path) -> str:
+    """Identify cohort state well enough to detect any change. Never raises.
+
+    Total by contract, and the totality is load-bearing rather than defensive:
+    the second call runs inside the cohort-lock hold, where `_locked` catches
+    only `StateLockError`, so anything escaping here leaves by traceback from a
+    verb whose own docstring promises "no traceback".
+
+    Reads through the guard layer's bounded reader, never a raw open. That
+    reader is non-following, non-blocking, size-capped and regular-file-only;
+    a raw read of a FIFO here blocks until both locks are judged stale and a
+    second writer is admitted, which is strictly worse than not holding a lock
+    at all. See `_loop_guards._read_managed_bytes`, whose docstring names that
+    hazard at exactly this step.
+
+    The digest is over the CANONICAL PARSED form, not the bytes. Content
+    identity is the property the verdicts actually depend on — every guard
+    reads the parsed mapping — so a rewrite that reorders keys or reflows
+    whitespace is not a spurious refusal, while any change a verdict could see
+    moves the value.
+
+    `ensure_ascii=True`, deliberately unlike `_contract_amendment_id` below. A
+    `state.json` holding a lone surrogate passes the reader's strict UTF-8
+    decode and dumps fine, then raises `UnicodeEncodeError` on the way to
+    bytes; an ASCII-only dump cannot. Do not "align" this flag with the
+    amendment id.
+    """
+    # Resolve the guard module, the state path and the exception class FIRST.
+    # The hazard is clause evaluation, not the loader's own failure mode: an
+    # `except _guards().ManagedContentError:` handler re-invokes the loader
+    # WHILE handling an exception, and a raise there escapes the whole `try`,
+    # because a later `except Exception` does not catch an exception raised
+    # while evaluating a preceding clause. `_guards()` is a lazy by-path loader
+    # that wraps every load failure in `GuardsUnavailable` (a `RuntimeError`),
+    # so a plain loader failure was always caught by the catch-all below and is
+    # not what this restructure fixes — but it can raise during handling, and
+    # that path had no arm at all.
+    try:
+        guards = _guards()
+        path = guards.state_path_for(spec_dir)
+        content_unusable = guards.ManagedContentError
+    except Exception:  # noqa: BLE001 - totality is the contract
+        return _FP_OTHER_UNUSABLE
+
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return _FP_ABSENT
+    except OSError:
+        # EACCES, ELOOP, ENOTDIR, ENAMETOOLONG. `_read_managed_bytes` converts
+        # exactly these from its own lstat, so hoisting the call out in front of
+        # it would drop coverage that already existed unless this arm restores it.
+        return _FP_OTHER_UNUSABLE
+    if not stat.S_ISREG(info.st_mode):
+        return _FP_NONREGULAR
+
+    try:
+        state = guards.read_state(spec_dir)
+    except FileNotFoundError:
+        return _FP_ABSENT
+    except content_unusable:
+        return _FP_CONTENT_UNUSABLE
+    except Exception:  # noqa: BLE001 - totality is the contract
+        return _FP_OTHER_UNUSABLE
+
+    try:
+        canonical = json.dumps(
+            state, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    except Exception:  # noqa: BLE001 - totality is the contract
+        # Unfalsifiable against the current reader, and deliberately kept.
+        # `RecursionError` from deep nesting is raised by `json.loads` inside
+        # `read_state` and caught by the arm above; a lone surrogate cannot fail
+        # `encode` under `ensure_ascii=True`. So no input reaches this arm today
+        # and no test can red it. It stays because it guards the contract rather
+        # than a known input: this runs inside the cohort-lock hold, where the
+        # cost of an escape is a traceback from a doubly-held lock, and a future
+        # change to the reader or to the canonical form reopens the path with no
+        # other net beneath it.
+        return _FP_OTHER_UNUSABLE
+
+
+_REGISTERED_COHORT_EFFECT_EVENTS = frozenset(
+    {
+        "contract-amendment",
+        "wave-passed",
+        "gates-failed",
+        "findings-remain",
+        "reviewers-clean",
+    }
+)
+_REVIEW_FINGERPRINT_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+
+# Registered cohort effects intentionally mutate cohort state through
+# loop-cohort.py before the engine-state commit. The old fingerprint hold is
+# still the right rail for all other events, but it would reject the successful
+# registered effect it is meant to protect.
+_FINGERPRINT_EXEMPT_EVENTS = _REGISTERED_COHORT_EFFECT_EVENTS
+
+
+def _transition_edge_has_cohort_effect(event: str, source_state: str) -> bool:
+    """Whether this FSM edge owns one of the closed registered cohort effects."""
+    if event not in _REGISTERED_COHORT_EFFECT_EVENTS:
+        return False
+    if event in {"findings-remain", "reviewers-clean"}:
+        return source_state == "CODE-REVIEW"
+    return True
+
+
+@contextlib.contextmanager
+def _cohort_commit_hold(spec_dir: Path, event: str | None):
+    """Hold the cohort lock across the commit, or nothing for an exempt event.
+
+    A context manager rather than two branches so `_write_events_pending` and
+    `_write_engine_state_atomic` appear exactly once: a checked and an unchecked
+    copy of the commit would drift apart with nothing reddening.
+
+    Deliberately NOT wrapped in a handler that continues. The pending write
+    below sits in a `try` whose `except Exception` warns and falls through to
+    the unconditional state write, and an acquisition swallowed there would
+    become an unlocked commit on a lock failure.
+    """
+    if event in _FINGERPRINT_EXEMPT_EVENTS:
+        yield
+        return
+    sl = _statelock()
+    with sl.exclusive(_guards().state_path_for(spec_dir)):
+        yield
+
+
+def _revalidate_cohort_state(
+    spec_dir: Path, event: str | None, captured: str
+) -> str | None:
+    """None when cohort state is unchanged since the capture, else the refusal.
+
+    Called by the caller that already holds the cohort lock; it does not
+    acquire. The refusal interpolates the two fingerprints and nothing else, so
+    it is bounded by construction — each is either a 64-character hex digest or
+    a fixed sentinel literal, and no attacker-influenceable cohort value reaches
+    stderr through it.
+    """
+    if event in _FINGERPRINT_EXEMPT_EVENTS:
+        return None
+    current = _cohort_fingerprint(spec_dir)
+    if current == captured:
+        return None
+    return (
+        "transition refused: cohort state changed between this transition's "
+        f"first read and its commit (captured {captured}, now {current}); "
+        "nothing was written — re-run the transition"
+    )
+
+
+def _lifecycle_fields(
+    spec_dir: Path, state: dict, now: str, *, event: str, next_state: str, waived: bool
+) -> dict:
+    """Build the additive lifecycle fields for one event line. Never raises."""
+    try:
+        phase_started_at = state.get("last_transition_at")
+        budgets = _budget_snapshot(spec_dir)
+        return {
+            "phase_started_at": phase_started_at,
+            "phase_s": _phase_duration_s(phase_started_at, now),
+            "result": _GATE_RESULTS.get(event),
+            "awaiting_input": next_state in _HUMAN_WAIT_STATES,
+            "waived": bool(waived),
+            "budgets": budgets,
+        }
+    except Exception:
+        # A partial line is worse than an explicitly empty one: a consumer
+        # summing durations would treat missing keys as zero.
+        return {
+            "phase_started_at": None,
+            "phase_s": None,
+            "result": _GATE_RESULTS.get(event),
+            "awaiting_input": next_state in _HUMAN_WAIT_STATES,
+            "waived": bool(waived),
+            "budgets": dict.fromkeys(_BUDGET_FIELDS),
+        }
+
+
 def _read_managed_json(path: Path, label: str) -> dict:
-    """Read a bounded regular JSON file without following or racing a symlink."""
-    try:
-        before = os.lstat(path)
-    except FileNotFoundError:
-        raise
-    except OSError as exc:
-        raise ValueError(f"{label} cannot be examined: {exc}") from exc
-    if not stat.S_ISREG(before.st_mode):
-        raise ValueError(f"{label} must be a regular file")
-    if before.st_size > _MAX_MANAGED_JSON_BYTES:
-        raise ValueError(
-            f"{label} exceeds {_MAX_MANAGED_JSON_BYTES}-byte (8 MiB) limit"
-        )
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(path, flags)
-    except FileNotFoundError:
-        raise
-    except OSError as exc:
-        raise ValueError(f"{label} cannot be opened safely: {exc}") from exc
-    try:
-        try:
-            opened = os.fstat(fd)
-            if not stat.S_ISREG(opened.st_mode):
-                raise ValueError(f"{label} must be a regular file")
-            identity = (before.st_dev, before.st_ino)
-            if (opened.st_dev, opened.st_ino) != identity:
-                raise ValueError(f"{label} changed while being opened")
-            chunks: list[bytes] = []
-            remaining = _MAX_MANAGED_JSON_BYTES + 1
-            while remaining:
-                chunk = os.read(fd, min(64 * 1024, remaining))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            raw = b"".join(chunks)
-            after_fd = os.fstat(fd)
-        except OSError as exc:
-            raise ValueError(f"{label} could not be read safely: {exc}") from exc
-    finally:
-        os.close(fd)
-    try:
-        after_path = os.lstat(path)
-    except OSError as exc:
-        raise ValueError(f"{label} changed while being read") from exc
-    if (
-        (after_fd.st_dev, after_fd.st_ino) != identity
-        or (after_path.st_dev, after_path.st_ino) != identity
-    ):
-        raise ValueError(f"{label} changed while being read")
-    if len(raw) > _MAX_MANAGED_JSON_BYTES:
-        raise ValueError(
-            f"{label} exceeds {_MAX_MANAGED_JSON_BYTES}-byte (8 MiB) limit"
-        )
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"{label} is not valid UTF-8") from exc
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"{label} malformed: {exc.msg} at line {exc.lineno}") from exc
-    if not isinstance(data, dict):
-        raise ValueError(f"{label} root must be an object")
-    return data
+    """Delegate to the shared bounded reader.
+
+    This was a byte-identical copy of `loop-cohort.py`'s. After this change the
+    engine loads `_loop_guards` anyway, so a third copy of the bounded,
+    symlink-safe, dev/ino-checked reader is exactly the drift AC3 forbids — and it
+    would have been the one copy missing `O_NONBLOCK`.
+    """
+    return _guards().read_managed_json(path, label)
 
 
 def _discard_regular_file(path: Path) -> bool:
@@ -206,7 +537,25 @@ def _discard_regular_file(path: Path) -> bool:
 
 
 def _ensure_gitignore_entry(gitignore_path: Path, entry: str) -> None:
-    existing = gitignore_path.read_text(encoding="utf-8") if gitignore_path.exists() else ""
+    """Append `entry` to `.gitignore` unless already present.
+
+    Reached from `cmd_init`, which is `@_locked`, so the read happens inside the
+    critical section. It used to be a plain `read_text()`: unbounded and BLOCKING, and
+    the caller's `is_symlink()` pre-check does not exclude a FIFO. With the repo-root
+    `.gitignore` as a FIFO, `init` hung indefinitely holding
+    `engine-state.json.lock` — past `stale_after`, at which point the lock is
+    reclaimed and a second writer admitted, which is exactly the lost update the lock
+    exists to prevent. `O_NONBLOCK` in the shared reader is what closes it, so this
+    goes through the reader rather than around it.
+
+    A read failure raises; the sole caller already wraps this in a warning, and
+    skipping the gitignore courtesy is the right degradation — it is a convenience,
+    not a correctness control.
+    """
+    try:
+        existing = _guards().read_managed_text(gitignore_path, ".gitignore")
+    except FileNotFoundError:
+        existing = ""
     if entry in existing.splitlines():
         return
     with gitignore_path.open("a", encoding="utf-8") as fh:
@@ -311,27 +660,90 @@ def _append_events_jsonl(repo_root: Path, event_data: dict) -> None:
             raise OSError(f"event log changed while being written ({path})")
 
 
+def _is_content_invalid(exc: BaseException) -> bool:
+    """Is this failure "the bytes are unusable" rather than "the read failed"?
+
+    Gates the DELETION of `events.pending`, a durable audit record, so getting it
+    wrong in the permissive direction destroys evidence. Asks the reader's own
+    exception hierarchy — `ManagedContentError` — rather than substring-matching
+    `str(exc)` against a hand-listed set of message fragments, which is what this did
+    at both call sites. That list had already fallen behind the reader: it omitted the
+    non-finite-number message, so a `NaN` in `events.pending` was never recognised as
+    invalid content and the file was retained forever, re-warning on every transition.
+
+    Resolved through the loaded guard module, not imported, because the engine loads
+    that module by path. A load failure is deliberately NOT content-invalid: it says
+    nothing about this file, and discarding a valid audit record over a build problem
+    is the data loss this function exists to prevent.
+    """
+    try:
+        return isinstance(exc, _guards().ManagedContentError)
+    except GuardsUnavailable:
+        return False
+
+
+class _MissingRequiredFields(ValueError):
+    """A promoted engine-state tmp parsed but lacks `state` or `run_id`.
+
+    A distinct class rather than a bare `ValueError`, so the delete decision can be
+    `isinstance`-based end to end: this IS invalid content (the tool wrote it and it
+    is unusable), while the reader's structural `ValueError`s are not.
+    """
+
+
 def _recover_engine_state_tmp(spec_dir: Path) -> None:
     """Complete any crash-left atomic engine-state rename; validate JSON before promoting."""
     for tmp_path in spec_dir.glob(".engine-state-*.json.tmp"):
         try:
             data = _read_managed_json(tmp_path, "engine-state tmp")
             if not isinstance(data, dict) or not data.get("state") or not data.get("run_id"):
-                raise ValueError("engine-state tmp is missing required fields")
-        except Exception as exc:
+                raise _MissingRequiredFields(
+                    "engine-state tmp is missing required fields"
+                )
+        except FileNotFoundError:
+            continue
+        except BaseException as exc:  # noqa: BLE001 — see below; nothing may escape
+            # TWO separate decisions here, and conflating them caused a bug in each
+            # direction on this line already.
+            #
+            # 1. WHAT IS CAUGHT: everything. An earlier revision narrowed this to
+            #    `(FileNotFoundError, ValueError)`, which missed `RecursionError` —
+            #    `json.loads` raises it on a deeply nested document, it is not a
+            #    `ValueError`, and `main()` catches only `GuardsUnavailable` and
+            #    `KeyboardInterrupt`. So a planted `.engine-state-*.json.tmp` holding
+            #    20k nested arrays produced a traceback from inside
+            #    `sl.exclusive(...)`, and because the dotfile was never removed, EVERY
+            #    later transition on that spec failed identically. Reproduced.
+            #
+            # 2. WHAT AUTHORISES THE DELETE: only invalid content. `_read_managed_json`
+            #    goes through the shared reader, so it can fail for reasons that say
+            #    nothing about this file — `GuardsUnavailable` from a missing guard
+            #    module, a permission error, a benign concurrent-writer race. Treating
+            #    those as "content invalid" unlinked a byte-perfect crash-recovery
+            #    artifact; observed. The two conditions co-occur naturally (an
+            #    interrupted `make build-self` plus a crash-left rename) and the loss
+            #    is irreversible.
+            #
+            # Catching broadly while deleting narrowly is what satisfies both.
+            if isinstance(exc, KeyboardInterrupt):
+                raise
+            invalid = isinstance(exc, _MissingRequiredFields) or _is_content_invalid(exc)
+            if invalid:
+                with contextlib.suppress(OSError):
+                    tmp_path.unlink(missing_ok=True)
             print(
-                f"loop-engine: warning — engine-state tmp invalid ({exc});"
-                f" discarding {tmp_path.name}",
+                f"loop-engine: warning — engine-state tmp unusable "
+                f"({type(exc).__name__}: {_diag(exc)}); "
+                + (f"discarding {_diag(tmp_path.name)}" if invalid
+                   else f"{_diag(tmp_path.name)} left in place; remove manually"),
                 file=sys.stderr,
             )
-            with contextlib.suppress(OSError):
-                tmp_path.unlink(missing_ok=True)
             continue
         try:
             tmp_path.replace(spec_dir / "engine-state.json")
         except OSError as exc:
             print(
-                f"loop-engine: warning — could not promote engine-state tmp ({exc})",
+                f"loop-engine: warning — could not promote engine-state tmp ({_diag(exc)})",
                 file=sys.stderr,
             )
         break  # only one tmp at a time
@@ -366,18 +778,14 @@ def _recover_pending(repo_root: Path) -> None:
     try:
         pending = _read_managed_json(pending_path, "events.pending")
     except Exception as exc:
-        detail = str(exc)
-        content_invalid = isinstance(exc, ValueError) and any(
-            marker in detail
-            for marker in (" exceeds ", "not valid UTF-8", " malformed:", " root must be")
-        )
+        content_invalid = _is_content_invalid(exc)
         action = (
             "discarded"
             if content_invalid and _discard_regular_file(pending_path)
             else "left in place; remove manually"
         )
         print(
-            f"loop-engine: warning — could not parse events.pending ({exc}); {action}",
+            f"loop-engine: warning — could not parse events.pending ({_diag(exc)}); {action}",
             file=sys.stderr,
         )
         return
@@ -400,7 +808,7 @@ def _recover_pending(repo_root: Path) -> None:
             else "left in place; remove manually"
         )
         print(
-            f"loop-engine: warning — events.pending spec path invalid ({exc}); {action}",
+            f"loop-engine: warning — events.pending spec path invalid ({_diag(exc)}); {action}",
             file=sys.stderr,
         )
         return
@@ -416,13 +824,20 @@ def _recover_pending(repo_root: Path) -> None:
         _discard_regular_file(pending_path)
         return
     except Exception as exc:
+        # Only a genuine CONTENT problem may authorise discarding the audit record —
+        # the same discrimination the events.pending read above already makes.
+        # `_read_managed_json` delegates to the shared reader now, so it can raise for
+        # reasons unrelated to this file (a `GuardsUnavailable` when `_loop_guards.py`
+        # cannot be loaded), and discarding `events.pending` over a build problem
+        # would destroy a durable audit record.
+        content_invalid = _is_content_invalid(exc)
         action = (
             "discarded"
-            if _discard_regular_file(pending_path)
+            if content_invalid and _discard_regular_file(pending_path)
             else "left in place; remove manually"
         )
         print(
-            f"loop-engine: warning — could not parse owning engine-state.json ({exc});"
+            f"loop-engine: warning — could not parse owning engine-state.json ({_diag(exc)});"
             f" pending {action}",
             file=sys.stderr,
         )
@@ -466,6 +881,7 @@ _BOTH_TRANSITIONS = {
 _CODE_TRANSITIONS = {
     **_BOTH_TRANSITIONS,
     ("SPEC-PLAN-APPROVED", "plan-locked"): "CODE-IMPLEMENTATION",
+    ("CODE-IMPLEMENTATION", "contract-amendment"): "SPEC-PLAN-DRAFTING",
     ("CODE-IMPLEMENTATION", "wave-complete"): "CODE-VERIFICATION",
     ("CODE-VERIFICATION", "wave-passed"): "CODE-IMPLEMENTATION",
     ("CODE-VERIFICATION", "gates-clean"): "CODE-REVIEW",
@@ -508,152 +924,509 @@ _DONE_EXEMPT_FROM_SCHEDULE_GUARD = frozenset({"done"})
 # Each entry: (mode, event) → guard_call_fn(spec_dir, engine_state, event_args)
 # Guard functions return None on success, or a non-empty error string on failure.
 
-LOOP_COHORT = str(SCRIPT_DIR / "loop-cohort.py")
-CHECK_SPEC_STATUS = str(SCRIPT_DIR / "check-spec-status.py")
+
+class GuardsUnavailable(RuntimeError):
+    """`_loop_guards.py` could not be loaded; every verb must refuse."""
 
 
-def _run(cmd: list[str]) -> tuple[int, str]:
-    """Run a subprocess; return (returncode, combined stderr). Bounded."""
+_guards_module: object | None = None
+_cohort_mutator_module: object | None = None
+_review_selection_module: ModuleType | None = None
+_review_compat_module: ModuleType | None = None
+
+# Sentinel distinguishing "never tried" from "tried and failed".
+_FACADE_UNAVAILABLE = object()
+_compat_facade_module: object = None  # None → not yet tried; _FACADE_UNAVAILABLE → failed
+
+
+def _guards():
+    """Load the sibling `_loop_guards.py` by path, once per process.
+
+    ── This function body is identical in all three of `loop-cohort.py`,
+    ── `loop-engine.py` and `check-spec-status.py`. That is a decision, not an
+    ── accident: the loader cannot live in the module it loads, and importing
+    ── `loop-cohort.py`'s 1500-line argparse CLI just to borrow it is the coupling
+    ── the whole change exists to avoid. `test_loader_copies_are_structurally_identical`
+    ── compares the three ASTs and keeps them from drifting.
+    ──
+    ── By path rather than `import _loop_guards`, matching `_statelock()`: a plain
+    ── import resolves under file-path invocation but not under the importlib-based
+    ── test harness, which does not put this directory on `sys.path`.
+    ──
+    ── NOT registered in `sys.modules`, also matching `_statelock()`. `exec_module`
+    ── does not remove a registered entry when the module body raises, so
+    ── registering would mean hand-rolling the failed-load cleanup that `import`
+    ── does for free — and would make the module a session-global singleton whose
+    ── memoised parser leaks between test files.
+    ──
+    ── `sys.dont_write_bytecode` is saved and restored to its PRIOR value, never to
+    ── `False`, so a host interpreter started with `-B` keeps its setting.
+    """
+    global _guards_module
+    if _guards_module is not None:
+        return _guards_module
+    path = SCRIPT_DIR / "_loop_guards.py"
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8", check=False,
-            timeout=SUBPROCESS_TIMEOUT_S,
+        info = os.lstat(path)
+    except OSError as exc:
+        raise GuardsUnavailable(
+            f"cannot load {path}: {exc}. Restore the file or re-run `make build-self`."
+        ) from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise GuardsUnavailable(
+            f"cannot load {path}: not a regular file (symlink or device). "
+            "Restore the file or re-run `make build-self`."
         )
-    except subprocess.TimeoutExpired:
-        return 1, (
-            f"timed out after {SUBPROCESS_TIMEOUT_S:.0f}s: {' '.join(cmd[:3])}"
+    previous = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("_loop_guards", str(path))
+        if spec is None or spec.loader is None:
+            raise GuardsUnavailable(f"cannot load {path}: no import spec")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except GuardsUnavailable:
+        raise
+    except BaseException as exc:
+        raise GuardsUnavailable(
+            f"cannot load {path}: {type(exc).__name__}: {exc}. Restore the file or "
+            "re-run `make build-self`."
+        ) from exc
+    finally:
+        sys.dont_write_bytecode = previous
+    if not getattr(module, "_MODULE_COMPLETE", False):
+        raise GuardsUnavailable(
+            f"cannot load {path}: module is truncated (no completeness marker). "
+            "Restore the file or re-run `make build-self`."
         )
-    return proc.returncode, (proc.stderr.strip() or proc.stdout.strip())
+    # AC13's completeness check: the module's OWN `__all__` is the contract, so it
+    # is never restated here. Three hand-enumerated copies drifted immediately —
+    # `check-spec-status.py`'s omitted `check_artifact_status`, the only function it
+    # calls — which is why an enumeration is explicitly rejected. A file truncated
+    # at a clean statement boundary loads WITHOUT raising, so `__all__` is present
+    # while the names it promises are not; that is the gap this closes.
+    exported = getattr(module, "__all__", None)
+    if not exported:
+        raise GuardsUnavailable(
+            f"cannot load {path}: module declares no __all__. Restore the file or "
+            "re-run `make build-self`."
+        )
+    missing = sorted(set(exported) - set(dir(module)))
+    if missing:
+        # Naming a few is diagnostic; naming all 21 makes a 450-char "one-line"
+        # refusal. The count carries the rest.
+        shown = ", ".join(missing[:5])
+        if len(missing) > 5:
+            shown += f" (+{len(missing) - 5} more)"
+        raise GuardsUnavailable(
+            f"cannot load {path}: incomplete module, missing {shown}. Restore the "
+            "file or re-run `make build-self`."
+        )
+    _guards_module = module
+    return _guards_module
 
 
-def _guard_plan_check_current_require_schedule(
-    spec_dir: Path, engine_state: dict, _
-) -> str | None:
-    rc, msg = _run(
-        [sys.executable, LOOP_COHORT, "plan", "check-current", str(spec_dir), "--require-schedule"]
+def _cohort_mutator():
+    """Load the sibling cohort writer for the cross-state amendment mutation."""
+    global _cohort_mutator_module
+    if _cohort_mutator_module is not None:
+        return _cohort_mutator_module
+    path = SCRIPT_DIR / "loop-cohort.py"
+    try:
+        observed = os.lstat(path)
+    except OSError as exc:
+        raise ImportError(f"cannot load {path}: {exc}") from exc
+    if not stat.S_ISREG(observed.st_mode):
+        raise ImportError(
+            f"cannot load {path}: not a regular file (symlink or device)"
+        )
+    previous = sys.dont_write_bytecode
+    module_name = "_work_loop_cohort_mutator"
+    try:
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location(module_name, str(path))
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {path}: no import spec")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(module_name, None)
+        raise
+    finally:
+        sys.dont_write_bytecode = previous
+    if not getattr(module, "_MODULE_COMPLETE", False):
+        sys.modules.pop(module_name, None)
+        raise ImportError(f"cannot load {path}: module is incomplete")
+    required = {
+        "apply_contract_amendment",
+        "contract_amendment_replay_status",
+        "parse_completed_task_evidence_entries",
+    }
+    missing = sorted(required - set(dir(module)))
+    if missing:
+        sys.modules.pop(module_name, None)
+        raise ImportError(
+            f"cannot load {path}: missing required amendment symbols "
+            + ", ".join(missing)
+        )
+    _cohort_mutator_module = module
+    return module
+
+
+def _review_selection() -> ModuleType:
+    """Load the sibling review-selection service for compatibility callers."""
+    global _review_selection_module
+    if _review_selection_module is not None:
+        return _review_selection_module
+    path = SCRIPT_DIR / "_review_selection.py"
+    try:
+        observed = os.lstat(path)
+    except OSError as exc:
+        raise ImportError(f"cannot load {path}: {exc}") from exc
+    if not stat.S_ISREG(observed.st_mode):
+        raise ImportError(
+            f"cannot load {path}: not a regular file (symlink or device)"
+        )
+    previous = sys.dont_write_bytecode
+    module_name = "_work_loop_review_selection"
+    try:
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location(module_name, str(path))
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {path}: no import spec")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
+    _review_selection_module = module
+    return module
+
+
+def project_current_engine_review_obligations(
+    delivery_subject: dict,
+    *,
+    changed_paths: list[dict],
+    review_policy: dict,
+    plan_digest: str | None = None,
+    task_projection_revision: str | None = None,
+    adapter_event_id: str | None = None,
+) -> tuple[dict, list[dict]]:
+    """Return current-engine review subject and obligations without CLI effects."""
+    return _review_selection().current_engine_review_obligations(
+        delivery_subject,
+        changed_paths=changed_paths,
+        review_policy=review_policy,
+        plan_digest=plan_digest,
+        task_projection_revision=task_projection_revision,
+        adapter_event_id=adapter_event_id,
     )
-    if rc != 0:
-        return f"plan check-current --require-schedule failed: {msg}"
-    return None
 
 
-def _guard_plan_check_current(spec_dir: Path, engine_state: dict, _) -> str | None:
-    rc, msg = _run(
-        [sys.executable, LOOP_COHORT, "plan", "check-current", str(spec_dir)]
+def _review_compat() -> ModuleType:
+    """Load the sibling review-compatibility adapter for importable callers."""
+    global _review_compat_module
+    if _review_compat_module is not None:
+        return _review_compat_module
+    path = SCRIPT_DIR / "_review_compat.py"
+    try:
+        observed = os.lstat(path)
+    except OSError as exc:
+        raise ImportError(f"cannot load {path}: {exc}") from exc
+    if not stat.S_ISREG(observed.st_mode):
+        raise ImportError(
+            f"cannot load {path}: not a regular file (symlink or device)"
+        )
+    previous = sys.dont_write_bytecode
+    module_name = "_work_loop_review_compat"
+    try:
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location(module_name, str(path))
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {path}: no import spec")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
+    _review_compat_module = module
+    return module
+
+
+def project_compat_reconcile_review_source_event(
+    store: object,
+    source_event: dict,
+    *,
+    legacy_state: dict,
+    review_subject: dict,
+    review_policy: dict,
+    issuer: object,
+    grant: object,
+    audit_sink: object,
+) -> dict:
+    """Importable, CLI-free compatibility caller for the T6 compat adapter.
+
+    Delegates to ``_review_compat.reconcile_review_source_event`` without any
+    CLI or transition-behavior side effects.  Mirrors the pattern established by
+    ``project_current_engine_review_obligations`` for review-obligation callers.
+    """
+    return _review_compat().reconcile_review_source_event(
+        store,
+        source_event,
+        legacy_state=legacy_state,
+        review_subject=review_subject,
+        review_policy=review_policy,
+        issuer=issuer,
+        grant=grant,
+        audit_sink=audit_sink,
     )
-    if rc != 0:
-        return f"plan check-current failed: {msg}"
-    return None
 
 
-def _guard_check_phase_implement(spec_dir: Path, engine_state: dict, _) -> str | None:
-    # Phase-1 stub: exits 0 unconditionally.
-    rc, msg = _run(
-        [sys.executable, LOOP_COHORT, "check", str(spec_dir), "--phase", "implement"]
+def _compat_facade():
+    """Load ``_compat_facade.py`` by path, or return ``_FACADE_UNAVAILABLE``.
+
+    A load failure is warned once and then remembered as the unavailable sentinel
+    so every subsequent call is a fast path rather than a repeated attempt.
+    Shadow services are optional; an unavailable facade silently disables them.
+
+    ── NOT registered in ``sys.modules`` (avoids session-global singleton leaks in
+    ── the test harness, matching the ``_loop_guards`` and ``_statelock`` loaders).
+    """
+    global _compat_facade_module
+    if _compat_facade_module is not None:
+        # Either the loaded module or _FACADE_UNAVAILABLE — both are fast paths.
+        return _compat_facade_module
+    path = SCRIPT_DIR / "_compat_facade.py"
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode):
+            raise ImportError(f"not a regular file: {path}")
+        previous = sys.dont_write_bytecode
+        try:
+            sys.dont_write_bytecode = True
+            spec = importlib.util.spec_from_file_location("_compat_facade", str(path))
+            if spec is None or spec.loader is None:
+                raise ImportError(f"no import spec for {path}")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous
+        if not getattr(module, "_MODULE_COMPLETE", False):
+            raise ImportError(f"{path}: module is truncated (no _MODULE_COMPLETE)")
+        _compat_facade_module = module
+        return module
+    except Exception as exc:  # noqa: BLE001 — shadow is optional
+        print(
+            f"loop-engine: warning — shadow facade unavailable "
+            f"({type(exc).__name__}: {_diag(exc)})",
+            file=sys.stderr,
+        )
+        _compat_facade_module = _FACADE_UNAVAILABLE
+        return _FACADE_UNAVAILABLE
+
+
+def _shadow_after_transition(
+    spec_dir: Path,
+    new_state: dict,
+    pending_data: dict,
+    *,
+    event: str,
+) -> None:
+    """Call the compatibility facade after a successful legacy transition.
+
+    Called AFTER the legacy commit (``engine-state.json`` written, pending
+    event appended).  Any exception at any layer is caught silently.
+
+    When ``WORK_LOOP_SHADOW_SERVICES`` is not ``"1"`` this is a no-op — the
+    engine's observable behavior (stdout, stderr, written files, exit code)
+    is byte-for-byte identical to the pre-facade engine.
+    """
+    if os.environ.get("WORK_LOOP_SHADOW_SERVICES") != "1":
+        return
+    facade = _compat_facade()
+    if facade is _FACADE_UNAVAILABLE:
+        return
+    try:
+        facade.shadow_call_on_transition(spec_dir, new_state, pending_data)
+        if event == "plan-locked":
+            facade.shadow_call_on_plan_locked(spec_dir, new_state)
+    except Exception:  # noqa: BLE001 — shadow must never affect legacy
+        pass
+
+
+# Each entry: (mode, event) → guard_fn(spec_dir, engine_state, event_args).
+# Guard functions return None on success, or a non-empty error string on failure —
+# the convention that predates this change and that `cmd_transition` still reads.
+#
+# Every one of these used to be `_run([sys.executable, LOOP_COHORT, ...])`. The
+# decisions now come from `_loop_guards`, so a transition is one interpreter. The
+# engine's own prefix is preserved verbatim on each; what disappeared is the nested
+# `loop-cohort: stop — ` / `check-spec-status: ` marker that only existed because a
+# child process's stderr was being captured.
+
+
+def _guard_reason(prefix: str, result) -> str | None:
+    """Compose the engine's error text from a GuardResult.
+
+    Branches on `ok`, never on `reason` — an `ok=False, reason=None` result would
+    otherwise read as success, and `GuardResult` raises rather than allowing that
+    combination in the first place.
+    """
+    if result.ok:
+        return None
+    return f"{prefix}: {result.reason}"
+
+
+def _guard_check_phase_wave_exit(spec_dir: Path, engine_state: dict, _) -> str | None:
+    """The wave exit: every task in the current wave carries a dispatch record.
+
+    Replaces `check --phase implement` on this edge. `implement` stays as it is,
+    because the always-run pre-PR hook runs that phase for every spec directory
+    with no state-machine gate, so a refusal there would be a repository-wide
+    push gate rather than a wave gate.
+
+    This adapter cannot surface the guard's absent-container notice: a passing
+    `GuardResult` carries no `reason` and `_guard_reason` returns None for one.
+    The skill runs `loop-cohort check --phase wave-exit` immediately before
+    firing this transition, which is that notice's only caller.
+    """
+    return _guard_reason(
+        "check --phase wave-exit failed",
+        _guards().check_phase(spec_dir, phase="wave-exit"),
     )
-    if rc != 0:
-        return f"check --phase implement failed: {msg}"
-    return None
 
 
 def _guard_check_phase_gates_failed(spec_dir: Path, engine_state: dict, _) -> str | None:
-    rc, msg = _run(
-        [sys.executable, LOOP_COHORT, "check", str(spec_dir), "--phase", "gates-failed"]
+    return _guard_reason(
+        "check --phase gates-failed failed",
+        _guards().check_phase(spec_dir, phase="gates-failed"),
     )
-    if rc != 0:
-        return f"check --phase gates-failed failed: {msg}"
-    return None
+
+
+def _guard_repair_round(spec_dir: Path, engine_state: dict, _) -> str | None:
+    """The repair-round check: refuse while a live record remains for this wave.
+
+    Callers compose this AFTER their own existing guard. A state failing both is
+    refused with the existing guard's reason, never this one's, so no
+    caller-visible message changes for a state this check would have passed
+    anyway.
+    """
+    return _guard_reason(
+        "check --phase wave-reopen failed",
+        _guards().check_phase(spec_dir, phase="wave-reopen"),
+    )
 
 
 def _guard_wave_check_more(spec_dir: Path, engine_state: dict, event_args: dict) -> str | None:
     wave_index = event_args.get("wave_index")
     if wave_index is None:
         return "wave-passed requires --wave-index"
-    cmd = [
-        sys.executable, LOOP_COHORT, "wave", "check", str(spec_dir),
-        "--expect", "more", "--wave-index", str(wave_index),
-    ]
-    rc, msg = _run(cmd)
-    if rc != 0:
-        return f"wave check --expect more --wave-index {wave_index} failed: {msg}"
-    return None
+    return _guard_reason(
+        f"wave check --expect more --wave-index {wave_index} failed",
+        _guards().check_wave(spec_dir, expect="more", wave_index=wave_index),
+    )
 
 
 def _guard_wave_check_last(spec_dir: Path, engine_state: dict, _) -> str | None:
-    rc, msg = _run(
-        [sys.executable, LOOP_COHORT, "wave", "check", str(spec_dir), "--expect", "last"]
+    return _guard_reason(
+        "wave check --expect last failed",
+        _guards().check_wave(spec_dir, expect="last"),
     )
-    if rc != 0:
-        return f"wave check --expect last failed: {msg}"
-    return None
 
 
-def _guard_check_phase_review(spec_dir: Path, engine_state: dict, _) -> str | None:
-    rc, msg = _run(
-        [sys.executable, LOOP_COHORT, "check", str(spec_dir), "--phase", "review"]
+def _guard_check_phase_review(
+    spec_dir: Path, engine_state: dict, event_args: dict
+) -> str | None:
+    override = event_args.get("allow_retry_cap_override", False)
+    err = _guard_reason(
+        "check --phase review failed",
+        _guards().check_phase(
+            spec_dir, phase="review", allow_review_retry_cap_override=override,
+        ),
     )
-    if rc != 0:
-        return f"check --phase review failed: {msg}"
-    return None
+    # The shared reason names no flag, because `loop-cohort check` prints it too
+    # and accepts none. This adapter does accept one, so it adds the remedy here
+    # -- including the second half, which is the part that is easy to miss.
+    if err and not override and "review retry cap reached" in err:
+        err += (
+            " — that is the default answer, because a cap firing means the loop "
+            "stopped converging. Only a human directing this run may continue "
+            "past it, by passing --allow-retry-cap-override to this transition "
+            "with --fingerprint for the sustained fingerprints; the engine records the cohort "
+            "review effect before it writes engine state"
+        )
+    return err
 
 
-def _guard_check_spec_status(spec_dir: Path, engine_state: dict, _) -> str | None:
-    rc, msg = _run([sys.executable, CHECK_SPEC_STATUS, str(spec_dir)])
-    if rc != 0:
-        return f"check-spec-status failed: {msg}"
-    return None
+def _guard_check_spec_status(
+    spec_dir: Path, engine_state: dict, event_args: dict
+) -> str | None:
+    """Require the status declared by the review unit's intent boundary."""
+    expect = "Implementing" if event_args.get("intent_incomplete", False) else "Shipped"
+    return _guard_reason(
+        "check-spec-status failed",
+        _guards().check_artifact_status(spec_dir, filename="spec.md", expect=expect),
+    )
+
+
+def _guard_done(spec_dir: Path, engine_state: dict, _) -> str | None:
+    """Guard done: the accepted intent's spec must be Shipped.
+
+    Before intent-scoped completion this held transitively — the only route into
+    CODE-HUMAN-GATE required Shipped. An intermediate unit may now enter that
+    state at Implementing, so DONE asserts completion explicitly instead.
+    """
+    return _guard_reason(
+        "check-spec-status --expect Shipped failed",
+        _guards().check_artifact_status(spec_dir, filename="spec.md", expect="Shipped"),
+    )
 
 
 def _guard_spec_approved(spec_dir: Path, engine_state: dict, _) -> str | None:
     """Guard for spec-approved: spec.md must have Status: Approved."""
-    rc, msg = _run(
-        [sys.executable, CHECK_SPEC_STATUS, str(spec_dir), "--expect", "Approved"]
+    return _guard_reason(
+        "check-spec-status --expect Approved failed",
+        _guards().check_artifact_status(spec_dir, filename="spec.md", expect="Approved"),
     )
-    if rc != 0:
-        return f"check-spec-status --expect Approved failed: {msg}"
-    return None
 
 
 def _guard_plan_approved(spec_dir: Path, engine_state: dict, _) -> str | None:
     """Guard for plan-approved: plan.md must have Status: Approved."""
-    rc, msg = _run(
-        [sys.executable, CHECK_SPEC_STATUS, str(spec_dir),
-         "--expect", "Approved", "--file", "plan.md"]
+    return _guard_reason(
+        "check-spec-status --expect Approved --file plan.md failed",
+        _guards().check_artifact_status(spec_dir, filename="plan.md", expect="Approved"),
     )
-    if rc != 0:
-        return f"check-spec-status --expect Approved --file plan.md failed: {msg}"
-    return None
 
 
 def _guard_plan_locked_code(spec_dir: Path, engine_state: dict, _) -> str | None:
-    """Guard for plan-locked (code mode): spec Approved + plan check-current --require-schedule."""
-    rc, msg = _run(
-        [sys.executable, CHECK_SPEC_STATUS, str(spec_dir), "--expect", "Approved"]
+    """plan-locked (code mode): spec Approved, then plan check-current --require-schedule.
+
+    Two checks in the same order as before — they were two child processes and are
+    now two function calls.
+    """
+    err = _guard_reason(
+        "check-spec-status --expect Approved failed",
+        _guards().check_artifact_status(spec_dir, filename="spec.md", expect="Approved"),
     )
-    if rc != 0:
-        return f"check-spec-status --expect Approved failed: {msg}"
-    rc, msg = _run(
-        [sys.executable, LOOP_COHORT, "plan", "check-current", str(spec_dir),
-         "--require-schedule"]
+    if err:
+        return err
+    return _guard_reason(
+        "plan check-current --require-schedule failed",
+        _guards().check_plan_current(spec_dir, require_schedule=True),
     )
-    if rc != 0:
-        return f"plan check-current --require-schedule failed: {msg}"
-    return None
 
 
 def _guard_plan_locked_spec_plan(spec_dir: Path, engine_state: dict, _) -> str | None:
-    """Guard for plan-locked (spec-plan mode): spec Approved + plan check-current."""
-    rc, msg = _run(
-        [sys.executable, CHECK_SPEC_STATUS, str(spec_dir), "--expect", "Approved"]
+    """plan-locked (spec-plan mode): spec Approved, then plan check-current."""
+    err = _guard_reason(
+        "check-spec-status --expect Approved failed",
+        _guards().check_artifact_status(spec_dir, filename="spec.md", expect="Approved"),
     )
-    if rc != 0:
-        return f"check-spec-status --expect Approved failed: {msg}"
-    rc, msg = _run(
-        [sys.executable, LOOP_COHORT, "plan", "check-current", str(spec_dir)]
+    if err:
+        return err
+    return _guard_reason(
+        "plan check-current failed",
+        _guards().check_plan_current(spec_dir, require_schedule=False),
     )
-    if rc != 0:
-        return f"plan check-current failed: {msg}"
-    return None
 
 
 def _guard_check_spec_status_on_code_review(
@@ -666,14 +1439,57 @@ def _guard_check_spec_status_on_code_review(
     return _guard_check_spec_status(spec_dir, engine_state, event_args)
 
 
-def _guard_check_phase_review_on_code_review(
+def _guard_gates_failed_repair_round(
     spec_dir: Path, engine_state: dict, event_args: dict
 ) -> str | None:
-    # findings-remain is legal from both SPEC-PLAN-REVIEW and CODE-REVIEW; the
-    # review retry-cap guard applies only on the CODE-REVIEW edge.
+    """gates-failed: its existing retry-cap guard, then the repair round.
+
+    `gates-failed` fires only from `CODE-VERIFICATION` in `_CODE_TRANSITIONS`,
+    unlike the twin-sourced `findings-remain` and `reviewers-clean`. The source-
+    state read below is not load-bearing today for that reason, but it keeps
+    this guard's shape identical to the other two composed guards, and it holds
+    the rule they all follow: the source state decides whether the repair-round
+    check applies, never the run mode. `_GUARDS` is keyed by mode, so mode alone
+    cannot tell these edges apart.
+    """
+    err = _guard_check_phase_gates_failed(spec_dir, engine_state, event_args)
+    if err:
+        return err
+    if engine_state.get("state") != "CODE-VERIFICATION":
+        return None
+    return _guard_repair_round(spec_dir, engine_state, event_args)
+
+
+def _guard_check_phase_review_repair_round(
+    spec_dir: Path, engine_state: dict, event_args: dict
+) -> str | None:
+    """findings-remain: its existing review-cap guard, then the repair round.
+
+    findings-remain fires from both `SPEC-PLAN-REVIEW` and `CODE-REVIEW` in a
+    code-mode run, through this same `("code", "findings-remain")` entry — see
+    `_guard_check_spec_status_on_code_review` for the identical twin-sourced
+    shape. The repair-round check applies only at `CODE-REVIEW`; a
+    `SPEC-PLAN-REVIEW` firing (reached at the start of every code run, and
+    again after `contract-amendment`) is admitted regardless of what
+    `dispatch_receipts` holds. `("spec-plan", "findings-remain")` stays wired to
+    `_guard_check_phase_review` directly — that edge never reaches a CODE-*
+    state, so it carries no repair-round check at all.
+    """
+    err = _guard_check_phase_review(spec_dir, engine_state, event_args)
+    if err:
+        return err
     if engine_state.get("state") != "CODE-REVIEW":
         return None
-    return _guard_check_phase_review(spec_dir, engine_state, event_args)
+    return _guard_repair_round(spec_dir, engine_state, event_args)
+
+
+def _guard_blocker_applied(
+    spec_dir: Path, engine_state: dict, event_args: dict
+) -> str | None:
+    """blocker-applied's first guard entry. It fires only from CODE-HUMAN-GATE."""
+    if engine_state.get("state") != "CODE-HUMAN-GATE":
+        return None
+    return _guard_repair_round(spec_dir, engine_state, event_args)
 
 
 # Guard dispatch: (mode, event) → guard_fn | None
@@ -684,12 +1500,15 @@ _GUARDS: dict[tuple[str, str], object] = {
     ("spec-plan", "plan-approved"): _guard_plan_approved,
     ("code", "plan-locked"): _guard_plan_locked_code,
     ("spec-plan", "plan-locked"): _guard_plan_locked_spec_plan,
-    ("code", "wave-complete"): _guard_check_phase_implement,
-    ("code", "gates-failed"): _guard_check_phase_gates_failed,
+    ("code", "wave-complete"): _guard_check_phase_wave_exit,
+    ("code", "gates-failed"): _guard_gates_failed_repair_round,
     ("code", "wave-passed"): _guard_wave_check_more,
     ("code", "gates-clean"): _guard_wave_check_last,
-    ("code", "findings-remain"): _guard_check_phase_review_on_code_review,
+    ("code", "findings-remain"): _guard_check_phase_review_repair_round,
+    ("spec-plan", "findings-remain"): _guard_check_phase_review,
     ("code", "reviewers-clean"): _guard_check_spec_status_on_code_review,
+    ("code", "blocker-applied"): _guard_blocker_applied,
+    ("code", "done"): _guard_done,
 }
 
 # ── engine-state.json helpers ──────────────────────────────────────────────
@@ -746,7 +1565,7 @@ def _resolve_spec_dir(raw: str) -> Path:
 
 
 def stop(reason: str, code: int = 1) -> int:
-    print(f"loop-engine: stop — {reason}", file=sys.stderr)
+    print(f"loop-engine: stop — {_diag(reason)}", file=sys.stderr)
     return code
 
 
@@ -756,8 +1575,7 @@ def stop(reason: str, code: int = 1) -> int:
 # read-decide-write around it is not. Two concurrent transitions both validate
 # against the same `current_state`, so BOTH are admitted where the second must
 # fail `illegal transition`, both compute the same `transition_sequence`, and the
-# durable outbox records the collision. Reproduced at 10/10 trials; see
-# docs/specs/loop-cohort-state-lock/notes/reproduction.md.
+# durable outbox records the collision. Reproduced at 10/10 trials.
 #
 # `_statelock.py` is a work-loop script owned by this skill (ADR-0074):
 # stdlib-only, so it works where `agentbundle` is not installed. `agentbundle`
@@ -775,11 +1593,23 @@ def _statelock():
     global _statelock_module
     if _statelock_module is None:
         lock_path = SCRIPT_DIR / "_statelock.py"
-        spec = importlib.util.spec_from_file_location("_statelock", str(lock_path))
-        if spec is None or spec.loader is None:
-            raise ImportError(f"loop-engine: cannot load {lock_path}")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        # `sys.dont_write_bytecode` around the load, saved and restored to its
+        # PRIOR value rather than unconditionally to False — mirroring the
+        # `_loop_guards` loader above. Without it this import writes and later
+        # READS `__pycache__/_statelock.*.pyc`, and a poisoned or stale entry
+        # executes inside the lock-holding engine process. One that made
+        # `exclusive()` a no-op would be worse than one that made a guard lie:
+        # it would admit a second writer while both believe they hold the lock.
+        previous = sys.dont_write_bytecode
+        try:
+            sys.dont_write_bytecode = True
+            spec = importlib.util.spec_from_file_location("_statelock", str(lock_path))
+            if spec is None or spec.loader is None:
+                raise ImportError(f"loop-engine: cannot load {lock_path}")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous
         _statelock_module = module
     return _statelock_module
 
@@ -874,7 +1704,20 @@ def cmd_init(args: argparse.Namespace) -> int:
                 os.close(event_fd)
                 gitignore = repo_root / ".gitignore"
                 if not gitignore.is_symlink():
-                    _ensure_gitignore_entry(gitignore, ".loop-run/")
+                    # Its OWN handler. Sharing the outer one reported "could not
+                    # initialise .loop-run/" for a failure in which `.loop-run/`, the
+                    # event log and the state write had all succeeded and only the
+                    # gitignore courtesy failed — sending an operator to the wrong
+                    # place. It is a convenience, so skipping it is the right
+                    # degradation, but it must say what it actually skipped.
+                    try:
+                        _ensure_gitignore_entry(gitignore, ".loop-run/")
+                    except Exception as exc:  # noqa: BLE001 — a courtesy, never fatal
+                        print(
+                            "loop-engine: warning — could not add .loop-run/ to "
+                            f".gitignore ({_diag(exc)}); add it manually",
+                            file=sys.stderr,
+                        )
         except Exception as exc:
             print(
                 f"loop-engine: warning — could not initialise .loop-run/: {exc}",
@@ -961,28 +1804,319 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def _run_id_preflight(spec_dir: Path, engine_run_id: str) -> str | None:
-    """Call loop-cohort identity --expect-run-id; return error string on failure."""
-    cmd = [
-        sys.executable, str(SCRIPT_DIR / "loop-cohort.py"),
-        "identity", str(spec_dir),
-        "--expect-run-id", engine_run_id,
-    ]
-    rc, msg = _run(cmd)
-    if rc != 0:
-        return f"run_id preflight failed: {msg}"
-    return None
+    """Engine/cohort run-ID pairing. In-process; was `loop-cohort.py identity`."""
+    return _guard_reason(
+        "run_id preflight failed",
+        _guards().check_identity(spec_dir, expect_run_id=engine_run_id),
+    )
 
 
 def _schedule_check_current(spec_dir: Path) -> str | None:
-    """Call loop-cohort schedule check-current; return error string on failure."""
-    cmd = [
-        sys.executable, str(SCRIPT_DIR / "loop-cohort.py"),
-        "schedule", "check-current", str(spec_dir),
-    ]
-    rc, msg = _run(cmd)
-    if rc != 0:
-        return f"schedule check-current failed: {msg}"
-    return None
+    """Scheduled-plan currency. In-process; was `loop-cohort.py schedule check-current`."""
+    return _guard_reason(
+        "schedule check-current failed",
+        _guards().check_schedule_current(spec_dir),
+    )
+
+
+def _contract_amendment_id(
+    run_id: str,
+    sequence: int,
+    owner_authority_ref: str,
+    reason_ref: str,
+    completed_task_evidence: dict[str, list[str]],
+) -> str:
+    evidence = json.dumps(
+        completed_task_evidence,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    material = (
+        f"{run_id}\0{sequence}\0{owner_authority_ref}\0{reason_ref}\0{evidence}"
+    )
+    return "amendment-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _canonical_transition_args(args: dict) -> dict:
+    """Return JSON-canonical transition args for durable transition identity."""
+    return json.loads(
+        json.dumps(args, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    )
+
+
+def _registered_transition_id(
+    run_id: str,
+    sequence: int,
+    event: str,
+    canonical_args: dict,
+) -> str:
+    """Return the single durable id shared by engine and cohort idempotency."""
+    args_json = json.dumps(
+        canonical_args, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    material = f"{run_id}\0{sequence}\0{event}\0{args_json}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _registered_recovery_pre_sequence(state: dict) -> int:
+    """Return the pre-transition sequence for an already-advanced engine state."""
+    context = state.get("last_event_context") or {}
+    persisted = context.get("pre_transition_sequence")
+    if (
+        isinstance(persisted, int)
+        and not isinstance(persisted, bool)
+        and persisted >= 0
+    ):
+        return persisted
+    current = state.get("transition_sequence", 0)
+    if isinstance(current, bool) or not isinstance(current, int) or current <= 0:
+        raise ValueError(
+            "registered transition recovery requires a positive engine "
+            "transition_sequence"
+        )
+    return current - 1
+
+
+def _review_clean_args_from_file(
+    spec_dir: Path,
+    *,
+    direct_clean_file: str | None,
+    structural_clean_file: str | None,
+    report: str | None,
+    adjudication: bool,
+) -> tuple[dict | None, str | None]:
+    """Reduce reviewers-clean file inputs to durable bounded facts."""
+    cohort = _cohort_mutator()
+    if direct_clean_file is not None:
+        if adjudication:
+            return None, (
+                "transition reviewers-clean: --direct-clean-file and "
+                "--adjudication name different recording forms"
+            )
+        artifact_path = cohort._resolved_report(direct_clean_file)
+        try:
+            raw = artifact_path.read_bytes()
+        except OSError:
+            return None, (
+                "transition reviewers-clean: --direct-clean-file is unreadable"
+            )
+        if raw != cohort.CLEAN_SUBSTRING.encode("utf-8"):
+            return None, (
+                "transition reviewers-clean: --direct-clean-file requires the "
+                "exact clean sentinel"
+            )
+        return {
+            "clean_source": "direct-clean",
+            "clean_digest": hashlib.sha256(raw).hexdigest(),
+        }, None
+    if structural_clean_file is not None:
+        if adjudication:
+            return None, (
+                "transition reviewers-clean: --structural-clean-file and "
+                "--adjudication name different recording forms"
+            )
+        artifact_path = cohort._resolved_report(structural_clean_file)
+        result = cohort._classify_raw_report(artifact_path)
+        if result["classification"] != "clean":
+            return None, (
+                "transition reviewers-clean: --structural-clean-file requires "
+                "a clean raw-report classification"
+            )
+        if result["not_checked_present"]:
+            return None, (
+                "transition reviewers-clean: a report carrying a '## Not checked' "
+                "footer is not eligible for the clean fast path"
+            )
+        digest = result.get("_classified_digest")
+        if not isinstance(digest, str):
+            return None, (
+                "transition reviewers-clean: --structural-clean-file produced "
+                "no digest for the classified bytes"
+            )
+        return {"clean_source": "structural-clean", "clean_digest": digest}, None
+    if report is not None:
+        if not adjudication:
+            return None, (
+                "transition reviewers-clean: --report requires --adjudication"
+            )
+        report_path = cohort._resolved_report(report)
+        state = cohort.read_state(spec_dir)
+        result = cohort._classify_report(
+            report_path,
+            state,
+            require_adjudication=True,
+        )
+        if result["classification"] != "clean":
+            return None, (
+                "transition reviewers-clean: --report classified as "
+                f"{result['classification']!r}; use findings-remain for findings"
+            )
+        try:
+            clean_digest = hashlib.sha256(report_path.read_bytes()).hexdigest()
+        except OSError:
+            return None, (
+                "transition reviewers-clean: --report became unreadable while "
+                "deriving its durable digest"
+            )
+        return {"clean_source": "report", "clean_digest": clean_digest}, None
+    return None, None
+
+
+def _persisted_reviewers_clean_args(
+    spec_dir: Path,
+    *,
+    pre_transition_sequence: int,
+    requested_source: str,
+) -> tuple[dict | None, str | None]:
+    """Recover reduced clean facts for a prepared or applied transition."""
+    cohort = _cohort_mutator()
+    state = cohort.read_state(spec_dir)
+    candidates: list[object] = [state.get("pending_transition")]
+    history = state.get("transition_history", [])
+    if isinstance(history, list) and history:
+        candidates.append(history[-1])
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        if (
+            candidate.get("pre_transition_sequence") != pre_transition_sequence
+            or candidate.get("event") != "reviewers-clean"
+        ):
+            continue
+        stored = candidate.get("args")
+        if not isinstance(stored, dict):
+            return None, "transition reviewers-clean: persisted replay args are malformed"
+        if stored.get("clean_source") != requested_source:
+            return None, (
+                "transition reviewers-clean: replay payload form conflicts with "
+                "the persisted transition"
+            )
+        digest = stored.get("clean_digest")
+        if set(stored) != {"clean_source", "clean_digest"} or not (
+            isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
+            return None, "transition reviewers-clean: persisted replay args are malformed"
+        return _canonical_transition_args(stored), None
+    return None, None
+
+
+def _registered_effect_args(
+    spec_dir: Path,
+    event: str,
+    args: argparse.Namespace,
+    *,
+    pre_transition_sequence: int,
+) -> tuple[dict | None, str | None]:
+    """Validate and canonicalize registered cohort-effect payloads."""
+    fingerprints = tuple(getattr(args, "fingerprint", None) or [])
+    all_skipped = bool(getattr(args, "all_skipped", False))
+    direct_clean_file = getattr(args, "direct_clean_file", None)
+    structural_clean_file = getattr(args, "structural_clean_file", None)
+    report = getattr(args, "report", None)
+    adjudication = bool(getattr(args, "adjudication", False))
+    clean_option_count = sum(
+        value is not None for value in (direct_clean_file, structural_clean_file, report)
+    )
+
+    if event == "contract-amendment":
+        cohort = _cohort_mutator()
+        state = cohort.read_state(spec_dir)
+        waves = state.get("schedule_waves", [])
+        current_index = state.get("current_wave_index", 0)
+        prior = state.get("completed_task_ids", [])
+        if not isinstance(waves, list) or not isinstance(current_index, int):
+            return None, "transition contract-amendment requires a current scheduled wave"
+        completed = list(dict.fromkeys([*prior, *[t for w in waves[:current_index] for t in w]]))
+        try:
+            completed_task_evidence = cohort.parse_completed_task_evidence_entries(
+                tuple(args.completed_evidence_ref or []), set(completed)
+            )
+        except Exception as exc:
+            return None, f"contract-amendment evidence invalid: {_diag(exc)}"
+        args.completed_task_evidence = completed_task_evidence
+        return _canonical_transition_args(
+            {
+                "owner_authority_ref": args.owner_authority_ref,
+                "reason_ref": args.reason_ref,
+                "completed_task_evidence": completed_task_evidence,
+            }
+        ), None
+    if event == "wave-passed":
+        return _canonical_transition_args({"wave_index": args.wave_index}), None
+    if event == "gates-failed":
+        return {}, None
+    if event == "findings-remain":
+        if all_skipped or clean_option_count or adjudication:
+            return None, (
+                "transition findings-remain accepts --fingerprint and "
+                "--allow-retry-cap-override only"
+            )
+        if not fingerprints:
+            return None, "transition findings-remain requires --fingerprint"
+        if any(_REVIEW_FINGERPRINT_RE.fullmatch(fp) is None for fp in fingerprints):
+            return None, (
+                "transition findings-remain --fingerprint must be lowercase "
+                "40- or 64-character SHA hex"
+            )
+        return _canonical_transition_args(
+            {
+                "fingerprints": sorted(set(fingerprints)),
+                "allow_retry_cap_override": bool(args.allow_retry_cap_override),
+            }
+        ), None
+    if event == "reviewers-clean":
+        if fingerprints or bool(args.allow_retry_cap_override):
+            return None, (
+                "transition reviewers-clean does not accept findings evidence"
+            )
+        if all_skipped and clean_option_count:
+            return None, (
+                "transition reviewers-clean accepts either --all-skipped or one "
+                "clean report form"
+            )
+        if all_skipped:
+            return _canonical_transition_args({"all_skipped": True}), None
+        if clean_option_count == 0:
+            return None, (
+                "transition reviewers-clean requires --all-skipped or one clean "
+                "report form"
+            )
+        requested_source = (
+            "direct-clean"
+            if direct_clean_file is not None
+            else "structural-clean"
+            if structural_clean_file is not None
+            else "report"
+        )
+        if adjudication != (report is not None):
+            return None, (
+                "transition reviewers-clean: --adjudication is accepted only "
+                "with --report"
+            )
+        try:
+            persisted_args, persisted_err = _persisted_reviewers_clean_args(
+                spec_dir,
+                pre_transition_sequence=pre_transition_sequence,
+                requested_source=requested_source,
+            )
+        except Exception as exc:
+            return None, f"transition reviewers-clean replay args failed: {_diag(exc)}"
+        if persisted_err is not None:
+            return None, persisted_err
+        if persisted_args is not None:
+            return persisted_args, None
+        clean_args, err = _review_clean_args_from_file(
+            spec_dir,
+            direct_clean_file=direct_clean_file,
+            structural_clean_file=structural_clean_file,
+            report=report,
+            adjudication=adjudication,
+        )
+        if err is not None:
+            return None, err
+        return _canonical_transition_args(clean_args or {"all_skipped": True}), None
+    return None, None
 
 
 @_locked("transition")
@@ -992,8 +2126,32 @@ def cmd_transition(args: argparse.Namespace) -> int:
     except ValueError as exc:
         return stop(str(exc))
 
+    # Capture cohort identity FIRST, before anything in this verb can read
+    # cohort state. Four reads follow it — the run-id preflight, the plan-hash
+    # pre-guard, the event guard, and the budget snapshot that lands in the
+    # durable event record — and only two of those are `_GUARDS` entries, which
+    # is why no guard-derived set can stand in for capturing this early.
+    _cohort_fp_at_capture = _cohort_fingerprint(spec_dir)
+
     event = args.event
     wave_index = args.wave_index
+    intent_incomplete = args.intent_incomplete
+    allow_retry_cap_override = getattr(args, "allow_retry_cap_override", False)
+    owner_authority_ref = args.owner_authority_ref
+    reason_ref = args.reason_ref
+    completed_evidence_entries = tuple(args.completed_evidence_ref or [])
+    completed_task_evidence: dict[str, list[str]] = {}
+    args.completed_task_evidence = completed_task_evidence
+    review_payload_supplied = any(
+        (
+            getattr(args, "fingerprint", None),
+            getattr(args, "all_skipped", False),
+            getattr(args, "direct_clean_file", None),
+            getattr(args, "structural_clean_file", None),
+            getattr(args, "report", None),
+            getattr(args, "adjudication", False),
+        )
+    )
 
     # Validate --wave-index usage
     if event == "wave-passed":
@@ -1002,6 +2160,30 @@ def cmd_transition(args: argparse.Namespace) -> int:
     else:
         if wave_index is not None:
             return stop(f"transition {event!r} does not accept --wave-index")
+    if intent_incomplete and event != "reviewers-clean":
+        return stop("transition --intent-incomplete requires reviewers-clean")
+    if allow_retry_cap_override and event != "findings-remain":
+        return stop("transition --allow-retry-cap-override requires findings-remain")
+    if event == "contract-amendment":
+        if not owner_authority_ref:
+            return stop("transition contract-amendment requires --owner-authority-ref")
+        if not reason_ref:
+            return stop("transition contract-amendment requires --reason-ref")
+        try:
+            completed_task_evidence = (
+                _cohort_mutator().parse_completed_task_evidence_entries(
+                    completed_evidence_entries
+                )
+            )
+            args.completed_task_evidence = completed_task_evidence
+        except Exception as exc:
+            return stop(f"contract-amendment evidence invalid: {_diag(exc)}")
+    elif owner_authority_ref or reason_ref or completed_evidence_entries:
+        return stop(
+            f"transition {event!r} does not accept contract-amendment evidence"
+        )
+    if review_payload_supplied and event not in {"findings-remain", "reviewers-clean"}:
+        return stop(f"transition {event!r} does not accept review evidence")
 
     # recover at command start — before any early-exit check.
     # _recover_engine_state_tmp promotes crash-left .tmp → engine-state.json.
@@ -1036,10 +2218,95 @@ def cmd_transition(args: argparse.Namespace) -> int:
     current_state = state["state"]
     run_id = state["run_id"]
 
+    if intent_incomplete and current_state != "CODE-REVIEW":
+        return stop("transition --intent-incomplete requires CODE-REVIEW")
+    if (
+        current_state == "SPEC-PLAN-REVIEW"
+        and event in {"findings-remain", "reviewers-clean"}
+        and (review_payload_supplied or allow_retry_cap_override)
+    ):
+        return stop(
+            f"transition {event} from SPEC-PLAN-REVIEW does not accept "
+            "review-effect payload"
+        )
+
     # Step 0: run_id preflight (all transitions)
     err = _run_id_preflight(spec_dir, run_id)
     if err:
         return stop(err)
+
+    # Engine-first divergence recovery: if engine-state already records a
+    # registered event at its target state but the cohort effect is missing,
+    # complete only the cohort side. Normal T3 commits write engine state last,
+    # so this is a repair for legacy/manual divergence, not the ordinary crash
+    # cut.
+    if event in _REGISTERED_COHORT_EFFECT_EVENTS and state.get("last_event") == event:
+        matching_sources = {
+            source
+            for (source, transition_event), target in _TRANSITIONS_BY_MODE.get(
+                mode, {}
+            ).items()
+            if transition_event == event and target == current_state
+        }
+        if any(
+            _transition_edge_has_cohort_effect(event, source)
+            for source in matching_sources
+        ):
+            try:
+                repair_seq = _registered_recovery_pre_sequence(state)
+            except ValueError as exc:
+                return stop(str(exc))
+            cohort_effect_args, effect_err = _registered_effect_args(
+                spec_dir,
+                event,
+                args,
+                pre_transition_sequence=repair_seq,
+            )
+            if effect_err:
+                return stop(effect_err)
+            transition_id = _registered_transition_id(
+                run_id, repair_seq, event, cohort_effect_args or {}
+            )
+            try:
+                replay_status = _cohort_mutator().transition_replay_status(
+                    spec_dir,
+                    transition_id=transition_id,
+                    pre_transition_sequence=repair_seq,
+                    event=event,
+                    args=cohort_effect_args or {},
+                )
+            except Exception as exc:
+                return stop(f"{event} replay check failed: {_diag(exc)}")
+            if replay_status == "conflict":
+                return stop(f"{event} cohort state conflicts with this event")
+            if replay_status == "absent" and event == "contract-amendment":
+                err = _schedule_check_current(spec_dir)
+                if err:
+                    return stop(err)
+            try:
+                if replay_status == "absent":
+                    _cohort_mutator().prepare_transition(
+                        spec_dir,
+                        transition_id=transition_id,
+                        pre_transition_sequence=repair_seq,
+                        event=event,
+                        args=cohort_effect_args or {},
+                        opened_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    )
+                _cohort_mutator().apply_transition_effect(
+                    spec_dir,
+                    transition_id=transition_id,
+                    pre_transition_sequence=repair_seq,
+                    event=event,
+                    args=cohort_effect_args or {},
+                )
+            except Exception as exc:
+                return stop(f"{event} cohort recovery failed: {_diag(exc)}")
+            print(
+                f"loop-engine: {event} replay completed cohort state "
+                f"for {spec_dir.name}"
+            )
+            return 0
 
     # Step 1: validate event against FSM for current mode × state
     table = _TRANSITIONS_BY_MODE.get(mode, {})
@@ -1049,29 +2316,121 @@ def cmd_transition(args: argparse.Namespace) -> int:
             f"illegal transition: mode={mode!r} state={current_state!r} event={event!r}"
         )
     next_state = table[key]
+    cohort_effect_enabled = _transition_edge_has_cohort_effect(event, current_state)
+
+    pre_seq = int(state.get("transition_sequence", 0))
+    new_seq = pre_seq + 1
+    cohort_effect_args = None
+    transition_id = None
+    cohort_effect_already_applied = False
+    if cohort_effect_enabled:
+        cohort_effect_args, err = _registered_effect_args(
+            spec_dir,
+            event,
+            args,
+            pre_transition_sequence=pre_seq,
+        )
+        if err:
+            return stop(err)
+        transition_id = _registered_transition_id(
+            run_id, pre_seq, event, cohort_effect_args or {}
+        )
+        try:
+            replay_status = _cohort_mutator().transition_replay_status(
+                spec_dir,
+                transition_id=transition_id,
+                pre_transition_sequence=pre_seq,
+                event=event,
+                args=cohort_effect_args or {},
+            )
+        except Exception as exc:
+            return stop(f"{event} replay check failed: {_diag(exc)}")
+        if replay_status == "conflict":
+            return stop(f"{event} cohort state conflicts with this event")
+        cohort_effect_already_applied = replay_status == "applied"
 
     # Step 1b: mandatory plan-hash check for CODE-* states (except `done`)
-    if current_state in _CODE_STATES and event not in _DONE_EXEMPT_FROM_SCHEDULE_GUARD:
+    if (
+        current_state in _CODE_STATES
+        and event not in _DONE_EXEMPT_FROM_SCHEDULE_GUARD
+        and not cohort_effect_already_applied
+    ):
         err = _schedule_check_current(spec_dir)
         if err:
             return stop(err)
 
     # Step 2: fire event-specific guard (if one exists)
     guard_fn = _GUARDS.get((mode, event))
-    if guard_fn is not None:
+    if guard_fn is not None and not cohort_effect_already_applied:
         event_args = {}
         if wave_index is not None:
             event_args["wave_index"] = wave_index
+        if intent_incomplete:
+            event_args["intent_incomplete"] = True
+        if allow_retry_cap_override:
+            event_args["allow_retry_cap_override"] = True
         err = guard_fn(spec_dir, state, event_args)
         if err:
             return stop(err)
 
+    if cohort_effect_enabled:
+        assert transition_id is not None
+        assert cohort_effect_args is not None
+        if not cohort_effect_already_applied:
+            try:
+                _cohort_mutator().prepare_transition(
+                    spec_dir,
+                    transition_id=transition_id,
+                    pre_transition_sequence=pre_seq,
+                    event=event,
+                    args=cohort_effect_args,
+                    opened_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                )
+                replay_status = _cohort_mutator().transition_replay_status(
+                    spec_dir,
+                    transition_id=transition_id,
+                    pre_transition_sequence=pre_seq,
+                    event=event,
+                    args=cohort_effect_args,
+                )
+            except Exception as exc:
+                return stop(f"{event} cohort prepare failed: {_diag(exc)}")
+            if replay_status == "conflict":
+                return stop(f"{event} cohort state conflicts with this event")
+        try:
+            _cohort_mutator().apply_transition_effect(
+                spec_dir,
+                transition_id=transition_id,
+                pre_transition_sequence=pre_seq,
+                event=event,
+                args=cohort_effect_args,
+            )
+        except Exception as exc:
+            return stop(f"{event} cohort mutation failed: {_diag(exc)}")
+
     # Build transition metadata (shared by outbox and engine-state write).
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    new_seq = int(state.get("transition_sequence", 0)) + 1
     last_event_context = None
     if event == "wave-passed" and wave_index is not None:
-        last_event_context = {"completed_wave_index": wave_index}
+        last_event_context = {
+            "completed_wave_index": wave_index,
+            "pre_transition_sequence": pre_seq,
+        }
+    elif event == "contract-amendment":
+        last_event_context = {
+            "amendment_id": transition_id,
+            "pre_transition_sequence": pre_seq,
+            "owner_authority_ref": owner_authority_ref,
+            "reason_ref": reason_ref,
+            "completed_task_evidence": completed_task_evidence,
+        }
+    elif event in {"findings-remain", "reviewers-clean"}:
+        last_event_context = {
+            "pre_transition_sequence": pre_seq,
+            **(cohort_effect_args or {}),
+        }
+    elif event in _REGISTERED_COHORT_EFFECT_EVENTS:
+        last_event_context = {"pre_transition_sequence": pre_seq}
 
     new_state = {
         **state,
@@ -1100,22 +2459,91 @@ def cmd_transition(args: argparse.Namespace) -> int:
         "event": event,
         "to": next_state,
         "at": now,
+        # Versioned so a consumer can tell a record written by this build from a
+        # legacy one. Placed after the seven identity fields, whose names, order
+        # and values are fixed so that adding a field never breaks an existing
+        # reader. The replay path does not set it: a record written before this
+        # key existed is appended unchanged rather than retro-stamped.
+        "schema": 1,
+        # `state` is still the PRE-transition record here, so its
+        # `last_transition_at` is when the phase being left began. At the first
+        # transition that value is what `init` wrote, which is the run's start.
+        **_lifecycle_fields(
+            spec_dir, state, now,
+            event=event, next_state=next_state, waived=allow_retry_cap_override,
+        ),
     }
 
     # Outbox pre-flight: reuse repo root resolved at command start.
     _repo_root: Path | None = _cmd_transition_repo_root
 
-    # Outbox step 1b: write new pending event (graceful).
+    # Step 3: commit, under the cohort lock unless this event is exempt.
+    # The re-read, the pending write and the state write are one sequence
+    # inside one hold; the outbox append and unlink stay outside it, because by
+    # then the transition is already durable and a reclaim there costs a
+    # recoverable remnant rather than a phantom transition.
     _pending_written = False
-    if _repo_root is not None:
-        try:
-            _write_events_pending(_repo_root, pending_data)
-            _pending_written = True
-        except Exception as exc:
-            print(f"loop-engine: warning — could not write events.pending: {exc}", file=sys.stderr)
+    # Whether the engine-state write actually landed. The reclaim handler below
+    # cannot infer it: a plain `return` inside the `with` still runs the
+    # context manager's exit, so a staleness refusal that wrote NOTHING can be
+    # re-rendered by that handler with the opposite instruction, and the
+    # refusal's own return value is discarded on the way.
+    _committed = False
+    try:
+        cohort_hold_event = event if cohort_effect_enabled else None
+        with _cohort_commit_hold(spec_dir, cohort_hold_event):
+            _stale = _revalidate_cohort_state(
+                spec_dir, cohort_hold_event, _cohort_fp_at_capture
+            )
+            if _stale:
+                return stop(_stale)
 
-    # Step 3: write engine-state.json atomically (critical — not wrapped).
-    _write_engine_state_atomic(spec_dir, new_state)
+            # Outbox step 1b: write new pending event (graceful).
+            if _repo_root is not None:
+                try:
+                    _write_events_pending(_repo_root, pending_data)
+                    _pending_written = True
+                except Exception as exc:
+                    print(
+                        f"loop-engine: warning — could not write events.pending: {exc}",
+                        file=sys.stderr,
+                    )
+
+            # Write engine-state.json atomically (critical — not wrapped).
+            _write_engine_state_atomic(spec_dir, new_state)
+            _committed = True
+    except _statelock().StateLockLost as exc:
+        # A reclaim detected at RELEASE. `exclusive` only notices lost
+        # ownership after its body, and the body has TWO exits: it may have
+        # written engine-state, or it may have returned a refusal before
+        # writing — a plain `return` inside a `with` still runs the exit. So
+        # this handler cannot assume a commit, and the branch below is not
+        # dead. Assuming one is what told an operator not to re-run a
+        # transition that had written nothing.
+        if not _committed:
+            # The body refused before writing, and the reclaim then swallowed
+            # that refusal. Nothing landed, so the remedy is the refusal's, not
+            # the reclaim's.
+            return stop(
+                f"transition: cohort state lock lost at release: {exc}; the "
+                "transition had already refused before writing, so nothing was "
+                "committed — re-run it"
+            )
+        return stop(
+            f"transition: cohort state lock lost at release: {exc}. The "
+            "transition DID commit and engine-state.json is updated; the "
+            "events.pending record is finished by the next run. Do NOT re-run "
+            "this transition — check the current state first."
+        )
+    except _statelock().StateLockError as exc:
+        # An acquisition failure: nothing was written, so retrying is correct.
+        # Named as the COHORT lock because `_locked`'s own handler renders an
+        # engine-lock failure through the same `stop()`, and an operator who
+        # cannot tell the two apart cannot tell which verb to wait for.
+        return stop(
+            f"transition: cohort state lock: {exc}; nothing was written — "
+            "retry once the competing cohort verb finishes"
+        )
 
     # Outbox steps 3–4: append events.jsonl + delete pending (graceful).
     if _pending_written and _repo_root is not None:
@@ -1128,6 +2556,10 @@ def cmd_transition(args: argparse.Namespace) -> int:
     print(
         f"loop-engine: transition {current_state!r} → {event!r} → {next_state!r} "
         f"(seq={new_seq}) for {spec_dir.name}"
+    )
+    # Shadow hook — AFTER the legacy commit and print.  Never changes legacy behavior.
+    _shadow_after_transition(
+        spec_dir, new_state, pending_data, event=event,
     )
     return 0
 
@@ -1149,6 +2581,58 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("spec_dir")
     sp.add_argument("event")
     sp.add_argument("--wave-index", type=int, dest="wave_index", default=None)
+    sp.add_argument(
+        "--intent-incomplete",
+        action="store_true",
+        help="declare reviewers-clean is an intermediate unit of an incomplete intent",
+    )
+    sp.add_argument(
+        "--allow-retry-cap-override",
+        action="store_true",
+        dest="allow_retry_cap_override",
+        help="waive the review retry cap for this findings-remain transition",
+    )
+    sp.add_argument(
+        "--fingerprint",
+        action="append",
+        default=None,
+        help="finding fingerprint payload for findings-remain",
+    )
+    sp.add_argument(
+        "--direct-clean-file",
+        default=None,
+        help="persisted exact clean reviewer return for reviewers-clean",
+    )
+    sp.add_argument(
+        "--structural-clean-file",
+        default=None,
+        help="raw clean reviewer return accepted by review raw-classify",
+    )
+    sp.add_argument(
+        "--report",
+        default=None,
+        help="clean adjudication report for reviewers-clean",
+    )
+    sp.add_argument(
+        "--all-skipped",
+        action="store_true",
+        default=False,
+        dest="all_skipped",
+        help="all warranted reviewers were named skips for reviewers-clean",
+    )
+    sp.add_argument(
+        "--adjudication",
+        action="store_true",
+        help="require the finding-adjudicator envelope for --report",
+    )
+    sp.add_argument("--owner-authority-ref", dest="owner_authority_ref", default=None)
+    sp.add_argument("--reason-ref", dest="reason_ref", default=None)
+    sp.add_argument(
+        "--completed-evidence-ref",
+        dest="completed_evidence_ref",
+        action="append",
+        default=[],
+    )
     sp.set_defaults(func=cmd_transition)
 
     sp = sub.add_parser("status", help="read engine-state.json + pending_human_wait")
@@ -1168,6 +2652,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
+    except GuardsUnavailable as exc:
+        # The engine's chokepoint, matching loop-cohort's. Without this every
+        # `_loop_guards.py` load failure printed a traceback out of `cmd_transition`
+        # while `sl.exclusive(...)` was held — the one outcome the whole change
+        # exists to prevent. `_guards()` is called lazily from inside the locked
+        # section, so the raise cannot be caught any earlier than here.
+        return stop(str(exc))
     except KeyboardInterrupt:
         return stop("interrupted")
 

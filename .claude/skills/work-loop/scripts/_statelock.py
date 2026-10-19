@@ -44,10 +44,10 @@ Hardening, each item a defect the older implementation still has:
   the path visible before the ownership record is written, so an empty record
   may belong to a live creator. It remains eligible for crash recovery, but
   only after the same ``stale_after`` budget as a complete recognised record.
-* **No ``mkdir``.** Creating the lock's parent is safe only for a confined state
-  path, and ``loop-cohort.py``'s spec-dir resolver does not confine to the repo
-  root — so it would gain an arbitrary-directory-creation side effect on a path
-  it then refuses.
+* **No ``mkdir``.** The lock synchronizes an existing state-file operation; it
+  does not initialize state directories. Creating a missing parent here would
+  add an unrelated filesystem mutation before the caller can report its
+  state-path error.
 * **Errors do not derive from ``OSError``.** Both callers carry broad
   ``except OSError`` / ``except Exception`` handlers around the regions that take
   this lock, so an ``OSError``-derived failure is one boundary-drift away from
@@ -64,7 +64,7 @@ import re
 import stat
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Generator
 from pathlib import Path
 
 __all__ = [
@@ -196,6 +196,24 @@ def _reclaim(lock: Path, observed: os.stat_result, record: bytes | None) -> None
     (:class:`StateLockLost`) rather than a bystander losing a write silently.
     """
     claimed = lock.with_name(f"{lock.name}.reclaim.{uuid.uuid4().hex}")
+    # Confirm the lock path still holds exactly the file judged stale BEFORE
+    # moving it. The move is what frees the path, so a contender working from a
+    # snapshot that a successful reclaim has already superseded would otherwise
+    # rename a *live* holder's lock away and leave the path free while that
+    # holder is still inside its section — long enough for a third contender's
+    # O_CREAT|O_EXCL to succeed and put two holders in the section at once.
+    # Checking here does not make reclaim atomic: this check and the rename are
+    # still two operations, so a holder that acquires between them is displaced
+    # exactly as before, and reports StateLockLost at release. What it removes is
+    # the far larger window in which the mover had not yet looked at all.
+    try:
+        current = os.lstat(lock)
+    except OSError:
+        return  # released or reclaimed by another contender first
+    if not _same_file(current, (observed.st_dev, observed.st_ino)) or (
+        _read_record(lock) != record
+    ):
+        return  # no longer the file judged stale — leave it alone
     try:
         Path(lock).rename(claimed)
     except OSError:
@@ -245,7 +263,7 @@ def exclusive(
     timeout: float = DEFAULT_TIMEOUT,
     stale_after: float = DEFAULT_STALE_AFTER,
     poll: float = DEFAULT_POLL,
-) -> Iterator[Path]:
+) -> Generator[Path, None, None]:
     """Hold an exclusive lock on ``<path>.lock`` for the duration of the block.
 
     Open the critical section *before* the read whose decision the write

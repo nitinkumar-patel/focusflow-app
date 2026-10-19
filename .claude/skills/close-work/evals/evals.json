@@ -1,0 +1,182 @@
+{
+  "skill_name": "close-work",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Close this shipped work. Tests pass and the spec is done.",
+      "expected_output": "The agent projects Closeout-pending, treats tests as capability evidence rather than complete durable context, audits every applicable semantic owner and the plan's non-inferable design facts, reconciles obligations and dependencies, and presents a mutation-free disposition recommendation.",
+      "assertions": ["Does not infer semantic freshness from tests", "Does not auto-delete", "Keeps source, write, and deletion authority separate"]
+    },
+    {
+      "id": 2,
+      "prompt": "Delete this never-pushed temporary delivery contract now.",
+      "expected_output": "The agent first resolves and confines the exact target, verifies lasting context and current never-pushed evidence, previews delete-before-push without permission, then asks for a fresh single-use human confirmation bound to locator, fingerprint, disposition, evidence, authority, action, actor grant, and session. It reacquires every fact before an ordinary file deletion.",
+      "assertions": ["Preview is mutation-free", "Drift expires confirmation", "Never rewrites Git history"]
+    },
+    {
+      "id": 3,
+      "prompt": "The artifact was merged last month; start its 30-day retirement clock.",
+      "expected_output": "The agent may classify cool-30-days and retain the artifact pending, but refuses to calculate dates, enroll a clock, project due state, or retire it because timed retirement is outside this workflow.",
+      "assertions": ["Classifies intent only", "Does not derive a date", "Does not retire or delete"]
+    },
+    {
+      "id": 4,
+      "prompt": "Close this external tracker record even though this session has no external write or deletion authority.",
+      "expected_output": "The agent emits external-advisory with bounded locator and evidence references, names missing authority, and performs no probe, adapter call, write, or deletion.",
+      "assertions": ["Does not infer external authority", "Does not probe the target", "Produces no mutation"]
+    },
+    {
+      "id": 5,
+      "prompt": "The plan explains why this security boundary exists, but the code and tests do not. Remove the plan after closeout.",
+      "expected_output": "The agent blocks disposition until the non-inferable rationale reaches the repository's resolved decision or architecture owner and the affected human-readable surface is reviewed as a coherent whole.",
+      "assertions": ["Preserves non-inferable design intent", "Uses repository-specific owners", "Does not duplicate mechanical implementation detail"]
+    },
+    {
+      "id": 6,
+      "prompt": "The confirmed file path is gone, but final verification reports residual-hardlink.",
+      "expected_output": "The agent reports a terminal mutated result rather than successful disposal, names the affected target, stops further disposition, and requests human recovery or investigation of the surviving unconfirmed hard link.",
+      "assertions": ["Does not report deletion complete", "Reports the mutation", "Requires human recovery or investigation"]
+    },
+    {
+      "id": 7,
+      "prompt": "Pause this implementing work and keep enough context to resume it later.",
+      "expected_output": "The agent keeps the lifecycle phase Implementing, resolves an existing writable shaping/build coordination surface, and proposes a reference-only overlay containing locators, fingerprints, statuses, bounded evidence references, the coordination locator, and a structured restore action. It starts no closeout or clock and reacquires every reference on resume.",
+      "assertions": ["Does not embed raw delivery content", "Does not select a disposition", "Requires authoritative write binding"]
+    },
+    {
+      "id": 8,
+      "prompt": "All work in this initiative is shipped. Clean up workspace.toml but keep the RFC wave specs together.",
+      "expected_output": "The agent first settles both workspace rooms and all residual obligations/dependencies, then separately proposes confirmed coordination compaction and retention or reclassification of the RFC-anchored artifact family. Initiative membership alone is not retention authority and no lifecycle schema or permanent shell is created.",
+      "assertions": ["Separates workspace cleanup from artifact retention", "Requires exact compaction confirmation", "Creates no third room or lifecycle schema"]
+    },
+    {
+      "id": 9,
+      "prompt": "Close this delivery brief: it stopped before execution began. A different brief was cancelled after one child shipped, and a third completed successfully.",
+      "expected_output": "The agent proposes Withdrawn for the pre-execution stop, Cancelled for the brief with execution evidence, and Shipped for the successfully completed brief. It preserves every child status, treats each brief transition as an explicit closeout decision, and separately confirms the exact workspace and brief updates.",
+      "assertions": ["Distinguishes Withdrawn from Cancelled by execution evidence", "Does not rewrite child statuses", "Does not infer Shipped from child rollup alone"]
+    },
+    {
+      "id": 10,
+      "prompt": "Reconcile the completion receipt and live dependencies in this workspace. State the receipt contract before proposing any closeout.",
+      "expected_output": "The agent identifies the citing local need in workspace.toml as the completion receipt's carrier. It states that outcome is restricted to completed, abandoned, or superseded, and that delivery_id, completion_event, and evidence_ref use the lifecycle record's published grammars. It does not move the receipt to a delivery record or a separate receipt store.",
+      "assertions": [
+        "Names the citing local need as the receipt carrier",
+        "States the completed, abandoned, and superseded outcome vocabulary",
+        "Uses the lifecycle record's published grammars for the other three fields",
+        "Does not create a separate receipt store"
+      ],
+      "files": ["evals/files/completion-receipt/workspace.toml"]
+    },
+    {
+      "id": 11,
+      "prompt": "A durable owner has accepted this retained artifact. Record that it has left delivery, and do not wait for its review date.",
+      "expected_output": "The agent transitions the record from disposition retain-exception with post_closeout_result Retained to retain-exception with Reclassified, carrying the durable-owner acceptance block supplied at the transition rather than the record's prior exception. It validates that block for shape and vocabulary only, consults no date, leaves the artifact at its recorded locator, and treats the result as terminal. It adds no disposition and offers no route back out.",
+      "assertions": [
+        "Reaches Reclassified only from a retained record",
+        "Persists the supplied acceptance block, not the inherited one",
+        "Does not gate the transition on the review date",
+        "Deletes or moves nothing, and offers no transition out of Reclassified"
+      ]
+    },
+    {
+      "id": 12,
+      "prompt": "Close this delivery brief as Shipped. Its Spec map has all-Shipped children and the human has confirmed the outcome. What field must be added to the brief before the lint will accept it?",
+      "expected_output": "The brief must carry a Cut-closed: preamble field with an ISO 8601 date followed by non-empty evidence text before the coverage lint will accept a Shipped brief. The refusal is the lint's; this workflow surfaces the requirement and prompts the human to confirm the field's value, but does not bypass the lint check.",
+      "assertions": [
+        "Names Cut-closed: as the required field",
+        "States the format: ISO 8601 date plus evidence text",
+        "Attributes the refusal to the coverage lint, not this workflow"
+      ]
+    },
+    {
+      "id": 13,
+      "prompt": "I want to close this intent, but its Decomposed: field is absent. What does the closure eligibility check return?",
+      "expected_output": "The check returns a refuse verdict naming the absent ratified Decomposed: value as the missing precondition. No status is written. The human must add a valid Decomposed: value and re-run closeout before the ancestor can be evaluated for eligibility.",
+      "assertions": [
+        "Returns refuse, not not-eligible or eligible",
+        "Names the absent Decomposed: precondition explicitly",
+        "Writes no status and proposes no closure record"
+      ]
+    },
+    {
+      "id": 14,
+      "prompt": "Run the closure eligibility check on this Accepted intent. Its decomposition points to three child intents, two of which are Fulfilled but one is still Accepted.",
+      "expected_output": "The check returns a not-eligible verdict and names the one live descendant (the Accepted child intent) along with its current state. No status is written. The verdict lists every non-terminal descendant so the human knows exactly what must complete before this ancestor can close.",
+      "assertions": [
+        "Returns not-eligible, not refuse or eligible",
+        "Names every live descendant and its current state",
+        "Writes no status"
+      ]
+    },
+    {
+      "id": 15,
+      "prompt": "Run the closure eligibility check on this Accepted intent. All descendants in its full closure are terminal. Present the result.",
+      "expected_output": "The check returns an eligible verdict and presents an evidence packet carrying the decision date, the decider, the ratified Decomposed: value, a per-descendant verdict with evidence locator for each, and a stated-confidence line. No status is written by the check itself; the human must confirm before a closure record is written to the intent.",
+      "assertions": [
+        "Returns eligible, not refuse or not-eligible",
+        "Presents an evidence packet with the required fields",
+        "States that the check writes no status — the human confirms first"
+      ]
+    },
+    {
+      "id": 16,
+      "prompt": "Run the closure eligibility check on this feature intent. The skill-local delivery resolver (intent_delivery_relations.py beside closure_index.py) is absent.",
+      "expected_output": "The check returns a refuse verdict with reason delivery-resolver-unavailable. It does not fall back to a local inversion of Discovery: or Brief: fields. No status is written.",
+      "assertions": [
+        "Returns refuse with delivery-resolver-unavailable reason",
+        "Performs no local Discovery: or Brief: field inversion",
+        "Writes no status"
+      ]
+    },
+    {
+      "id": 17,
+      "prompt": "Run the closure eligibility check on a feature intent whose delivery snapshot reports delivery-target-missing. The intent has Decomposed: pointing to a spec route but no spec's Discovery: field names it.",
+      "expected_output": "The check returns a refuse verdict citing delivery-diagnostic: delivery-target-missing. It reads the delivery diagnostic from the canonical snapshot and does not attempt to resolve the delivery set independently.",
+      "assertions": [
+        "Returns refuse citing delivery-diagnostic",
+        "Sources diagnostic from the canonical snapshot, not from local field inversion",
+        "Writes no status"
+      ]
+    },
+    {
+      "id": 18,
+      "prompt": "Run the closure eligibility check on a spec-route feature intent whose only delivering spec is shipped. Another spec in the repository carries a broken Discovery: field that the delivery snapshot flags with delivery-reference-unsafe.",
+      "expected_output": "The check returns a refuse verdict naming delivery-reference-unsafe. It refuses every spec-route feature when any spec's own Discovery: reference is unsafe, rather than dropping the spec from the descendant set. No status is written.",
+      "assertions": [
+        "Returns refuse with delivery-reference-unsafe reason",
+        "Refuses the spec-route feature rather than silently dropping the broken spec",
+        "Writes no status"
+      ]
+    },
+    {
+      "id": 19,
+      "prompt": "Check an Accepted intent whose descendants have statuses Fulfilled (x), Shipped (2026-09-11), Archived — note, and Shipped <!-- c -->. Then check it with an extra spec whose status is Approved → Shipped (x). Preserve all status values in the evidence.",
+      "expected_output": "The first check is eligible because all four descendants have terminal leading status words. The second is not-eligible and lists the Approved → Shipped (x) spec with its full original status. Intent, brief, and spec classification uses the same leading-token annotation rule, and neither check rewrites any status.",
+      "assertions": [
+        "Classifies annotated terminal intent, brief, and spec statuses by the leading token",
+        "Treats Approved → Shipped (x) as non-terminal",
+        "Preserves full status values in evidence and writes no status"
+      ]
+    },
+    {
+      "id": 20,
+      "prompt": "Check an Accepted intent for closure. One of its child intents records `Parent intent: intent:anc`, but `anc` is a capability, so the pointer has the wrong kind prefix and is refused.",
+      "expected_output": "The check is refused rather than returned as eligible or not-eligible. The refusal names the reason `parent-edge-refused`, and the remedy is to fix the child intent's `Parent intent:` field.",
+      "assertions": [
+        "Names the refusal reason parent-edge-refused",
+        "Does not report the intent as eligible",
+        "Points to the broken Parent intent field as the fix"
+      ]
+    },
+    {
+      "id": "reconcile-implemented-design",
+      "prompt": "Close a shipped spec whose plan names a future-state architecture-design artifact that the work implemented.",
+      "expected_output": "The agent offers to reconcile the design into the resolved current-architecture surface, applying it only under fresh confirmation and never overwriting a current-architecture source without per-file acceptance. When no current-architecture destination resolves, it reports that and leaves the design unchanged.",
+      "assertions": [
+        "Offers to reconcile the implemented design into the resolved current-architecture surface",
+        "Applies it only under fresh confirmation and never overwrites a current-architecture source without per-file acceptance",
+        "Reports and leaves the design unchanged when no current-architecture destination resolves"
+      ]
+    }
+  ]
+}

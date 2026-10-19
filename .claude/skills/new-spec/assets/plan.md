@@ -2,18 +2,37 @@
 
 - **Spec:** [`spec.md`](spec.md)
 - **Status:** Drafting <!-- Drafting | Approved | Executing | Done -->
+- **Repository anchors:** <task-relevant architecture/convention source;
+  one or two analogous production implementations; corresponding tests or
+  construction path; named uncertainty/deviation — or `none — non-structural`>
 
-> **Plan contract:** this is the implementation strategy. Unlike the spec, this
-> document is allowed to change as you learn. When it changes substantially
-> (a different approach, not just a re-ordering), note why in the changelog
-> at the bottom.
+> **Plan contract:** this is the implementation strategy. It may change
+> substantively only while its Status is `Drafting`, before approval records its
+> baseline. After approval, `spec.md` and `plan.md` are pinned in substance;
+> only lifecycle bookkeeping is permitted, and execution observations belong in
+> `docs/specs/<feature>/notes/verification-ledger.md` (or the adopter's
+> equivalent). A genuine artifact error follows the controlled-amendment path.
+>
+> **Not every field is contract.** `Touches`, `Tests` and `Done when` are what a
+> completion gate reads, and they are pinned. `Design`, `Approach`, `Grounding`
+> and `Risks` are working material that an implementer corrects in place only
+> before approval: approval hashes the whole plan. After approval, grounding for
+> a seam recorded as `no stub (implementation-discovered)` goes to the
+> verification ledger; a settled design decision that execution falsified is a
+> plan error that follows the controlled-amendment procedure. Treating them as
+> contract is how a review spends a round on prose no gate consumes — the
+> measured share is over half the plan's lines. `Grounding` stays *recorded*,
+> because a per-task resolution that nobody wrote is not grounding; what it stops
+> being is a claim a reviewer holds the plan to.
 
-<!-- **Light-mode lean fill.** For low-risk work running the `work-loop`
-skill's light mode, only Approach + a short Tasks list are required.
-**Constraints**, **Risks**, **Changelog**, and the whole `## Design (LLD)`
-section are optional — keep them only if they earn their place. Any risk
-trigger (see the `work-loop` skill) escalates to full mode, where every
-section is filled. -->
+<!-- Existing plans without this field remain valid. Treat its absence as a
+named assurance gap during structural review, not a universal lint failure. -->
+
+<!-- **Durable-plan fill.** This template is the implementation and verification
+strategy for a durable delivery slice. Fill Approach, Constraints, Risks,
+Design, Tasks, and Changelog to the depth the durable work requires. Its sibling
+spec is the durable behavior contract. Eligible direct-light work does not
+create this artifact. -->
 
 ## Approach
 
@@ -57,6 +76,30 @@ that verify it live here.
 **Manual verification:** <list, or "none">
 -->
 
+## Durable-output map
+
+<!--
+This section maps each task to the spec's Durable Outputs table so closeout can
+verify planned output, implementation evidence, and closeout evidence without
+copying requirements into a second record.
+
+For each output, name:
+
+- planned output
+- implementing task(s)
+- implementation evidence
+- closeout evidence
+- unresolved destination or freshness blocker, if any
+
+If the plan's Design (LLD) contains a non-inferable design fact, map it to its
+semantic owner here. Mechanically evident details may stay with code, types,
+docstrings, and tests; one-off construction order may remain delivery residue.
+-->
+
+| Durable output | Tasks | Implementation evidence | Closeout evidence |
+| --- | --- | --- | --- |
+| <semantic role / destination> | <Tn> | <test, build, guide, contract, or review artifact> | <what close-work verifies> |
+
 ## Design (LLD)
 
 The low-level design — the *how*, below the Approach and above the per-task
@@ -69,10 +112,10 @@ anchored to something verifiable.
 
 Stack-neutral by construction: these are the *kinds* of design decision every
 build makes, never a framework. Name your actual stack *inside* each sub-section
-— derived from `docs/architecture/reference.md` when that file is present (use
-its components, stereotypes, and standards by name), otherwise from the
-established repo (lockfiles, build files, imports) or elicited when unclear. The
-headings themselves stay universal.
+from the repository's mapped architecture and convention sources. If none are
+usable, use manifests/build files and, for structural work, one or two analogous
+production implementations with their tests or construction path; elicit any
+unresolved load-bearing choice. The headings themselves stay universal.
 
 <!-- Shape → sub-sections (a guide, not a gate):
   ui          → decomposition, state & control flow, behavior & rules, quality attributes
@@ -85,42 +128,61 @@ Delete every sub-heading the shape doesn't select. -->
 ### Design decisions
 <!-- optional — the load-bearing choices and the alternatives rejected, one line
 of why each. Traces to: <AC(s) this satisfies> · <contracts/… it implements>. -->
+<!-- Owned by: <task ID(s) that implement this sub-section, e.g. T3, T4a>. -->
 
 ### Data & schema
 <!-- optional — entities, fields, types, ownership, migrations, retention.
 Traces to: <AC(s)> · <contracts/…>. -->
+<!-- When this feature migrates existing data, name backfill checkpointing,
+restartability, and cutover validation. -->
+<!-- Owned by: <task ID(s) that implement this sub-section, e.g. T3, T4a>. -->
 
 ### Interfaces & contracts
 <!-- optional — the surfaces this feature exposes or consumes (REST API, event
 interface, BFF, RPC). Point at the `contracts/<type>/` file each implements.
 Traces to: <AC(s)> · <contracts/…>. -->
+<!-- When this feature crosses a boundary, name a test seam for each
+crossed boundary. -->
+<!-- Owned by: <task ID(s) that implement this sub-section, e.g. T3, T4a>. -->
 
 ### Component / module decomposition
 <!-- optional — the parts and their responsibilities; what's new vs. reused; for
 UI, the component tree. Traces to: <AC(s)> · <contracts/…>. -->
+<!-- Owned by: <task ID(s) that implement this sub-section, e.g. T3, T4a>. -->
 
 ### State & control flow
 <!-- optional — state model and transitions; sequencing across components; for
 UI, screen states and navigation. Traces to: <AC(s)> · <contracts/…>. -->
+<!-- When state changes concurrently, name concurrency, consistency,
+locking, atomicity, and transaction boundaries. -->
+<!-- Owned by: <task ID(s) that implement this sub-section, e.g. T3, T4a>. -->
 
 ### Behavior & rules
 <!-- optional — the business and validation rules and the decisions they drive.
 Traces to: <AC(s)> · <contracts/…>. -->
+<!-- Owned by: <task ID(s) that implement this sub-section, e.g. T3, T4a>. -->
 
 ### Failure, edge cases & resilience
 <!-- optional — what can go wrong and the response: retries, fallbacks, timeouts,
 partial failure, idempotency, degraded modes. Traces to: <AC(s)> · <contracts/…>. -->
+<!-- When external failures are possible, name stable error classes,
+retryability, and external failure mapping. -->
+<!-- Owned by: <task ID(s) that implement this sub-section, e.g. T3, T4a>. -->
 
 ### Quality attributes (NFRs)
 <!-- optional — how the design meets each NFR-with-a-bar from the spec's
 Acceptance Criteria (performance, accessibility, security posture, operability).
 Traces to: <AC(s)> · <contracts/…>. -->
+<!-- When this feature needs operational visibility, name a concrete
+observability surface. -->
+<!-- Owned by: <task ID(s) that implement this sub-section, e.g. T3, T4a>. -->
 
 ### Dependencies & integration
 <!-- optional — external systems, services, and libraries this design leans on,
 and the coupling between them. (Reuse `Depends on:` / `Touches:` on the tasks
 below for *execution* ordering; this sub-section is for *design*-level coupling.)
 Traces to: <AC(s)> · <contracts/…>. -->
+<!-- Owned by: <task ID(s) that implement this sub-section, e.g. T3, T4a>. -->
 
 > **Rollout & deployment** — the tenth design dimension — is **not** a
 > sub-heading here. It is realized by [`## Rollout`](#rollout) below (infra,
@@ -133,13 +195,35 @@ The work-breakdown. Tasks are sized so each one is a coherent commit or PR.
 **Phrase each task as a verifiable goal, not a procedure.** The task name
 *is* the success criterion: *"Add validation"* → *"All invalid-input tests
 pass"*; *"Refactor X"* → *"Tests for X green before and after; public
-surface unchanged"*. **Within each task, `Tests:` comes before `Approach:`** —
-tests drive implementation, not the other way around. Use red-green-refactor
-with separate commits when the change is non-trivial.
+surface unchanged"*. Tests drive implementation, not the other way around, so
+`Tests:` leads every task. Use red-green-refactor with separate commits when
+the change is non-trivial.
+
+**`Approach:` is conditional.** Write one when the task carries a decision a
+reader cannot infer from `Tests:` and `Done when:` — an *ordering* decision
+(step B must follow step A for a reason the tests do not show) or a *seam*
+decision (which module, which existing helper, which boundary). Omit it when
+those two fields already say what to build and how it is observed: an
+`Approach:` that restates them is a second home for the same instruction, and
+no completion gate reads it. The field order is unchanged where it appears —
+`Tests:`, then `Approach:`, then `Done when:`.
 
 **Every task must declare `Depends on:` explicitly** — list prior task IDs
 or `none`. Don't omit the field; "obvious from order" is the failure mode
 that hides serial-by-default thinking. `none` is a valid and common answer.
+
+Planning is sufficient when the plan supplies an observable contract, owner,
+boundaries, ordering, discovery predicates where a seam is not grounded,
+required outcomes, and verification modes adequate to begin safely. It need
+not settle a helper name, symbol, fixture-internal detail, or complete edge-case
+matrix before implementation. Such questions are build-time guidance unless
+their absence makes the plan unable to start or verify the contract.
+
+Keep observable behavior in `spec.md`. Use an exact path or symbol here only
+when repository evidence grounds it. For an implementation-discovered callable
+seam, record `no stub (implementation-discovered)` and its discovery predicate,
+constraint, required outcome, and verification mode; do not invent a helper,
+fixture, module, path, or symbol.
 
 **`Depends on:` grammar** (so the supervisor-mode scheduler —
 `loop-cohort schedule` — can read it). The field is a comma-separated list of:
@@ -150,7 +234,9 @@ ignored, so `T11 (lands after the shim)` is fine. Cross-spec deps are
 *spec-sequencing*, not intra-plan waves, and are excluded from this plan's
 DAG. The scheduler **fails on a dependency cycle** and **warns on a
 forward-reference** (a dep authored later — it still schedules correctly by
-running the dep first).
+running the dep first). A `Depends on:` entry that
+names no task in the plan is refused: the run exits non-zero, every offending
+task→dep pair is named, and nothing is persisted.
 
 **Optional `Touches:` grammar** (read by `loop-cohort schedule`).
 A task *may* add a `**Touches:**` line listing the file globs it expects to
@@ -170,20 +256,24 @@ could pick it up and complete it without follow-up questions:
 
 ### T1: <task name>
 
-**Depends on:** <none | T0, ...>
+**Depends on:** <none | comma-separated prior task IDs>
 
 **Tests:**
 - <test 1 — behaviour, edge case, or property; reference the Acceptance
   Criterion from spec.md this step verifies, if any>
 - <test 2>
+<!-- For an already-grounded callable seam or coherent TDD task family, include
+     one compilable red contract-surface assertion (`stub: true`). It need not
+     encode the finished edge-case matrix. -->
 
-**Approach:**
-- <step 1>
-- <step 2>
+**Approach:** <omit this field unless the task carries an ordering or seam
+decision the two fields around it do not show>
+- <the decision, and why this way>
 
 **Done when:** <name a concrete observable — specific test green, gate
-  passing, behaviour visible at <surface>. Not "looks good" or "feature
-  works".>
+  passing, behaviour visible at <surface>. Never name `spec.md` or `plan.md` as
+  an execution-evidence destination; use the verification ledger. Not "looks
+  good" or "feature works".>
 
 ### T2: <task name>
 
@@ -221,10 +311,21 @@ slow the database", "this changes a behavior X teams depend on".
 ## Changelog
 
 <!--
-When the plan changes meaningfully, add a dated entry. This isn't bureaucracy —
-it's how a reviewer (or a returning agent) understands why the current plan
-looks different from yesterday's plan.
+Approvals, and nothing else. Drafting history does not belong here: while the
+plan is `Drafting` its current text is the only version anyone acts on, so a
+dated account of how it got there is the draft narration `spec.md`'s
+present-tense rule already refuses, one document over. After approval this
+section is pinned like the rest of the plan, and an execution observation goes
+to the verification ledger, not to a new changelog entry.
 
-- YYYY-MM-DD: initial plan
-- YYYY-MM-DD: switched from approach A to B because <reason>
+**Each approval is an entry.** The two forms are given at the end of this
+note — one per gate, a real date, the approver's own handle. Both live here
+because the plan carries the only dated history in the spec directory. Without them nothing in the artifacts says when
+the contract froze or on whose authority, so a later reader cannot tell which
+claims were in it at approval and which arrived afterwards. `work-loop`'s
+G-plan sequence owns *when* each is written and why the order matters; this
+template owns only the form.
+
+- YYYY-MM-DD: spec approved by <handle>
+- YYYY-MM-DD: plan approved by <handle>
 -->

@@ -13,17 +13,27 @@ Verb surface
 ------------
     loop-cohort init <spec-dir> --run-id <uuid>
     loop-cohort identity <spec-dir> [--expect-run-id <uuid>] [--json]
-    loop-cohort check <spec-dir> --phase {implement,review,gates-failed}
+    loop-cohort check <spec-dir> --phase {implement,review,gates-failed,wave-exit,
+                                           wave-reopen}
     loop-cohort approve-plan <spec-dir> --expect-run-id <uuid>
     loop-cohort plan check-current <spec-dir> [--require-schedule]
     loop-cohort schedule <spec-dir> --expect-run-id <uuid>
     loop-cohort schedule check-current <spec-dir>
+    loop-cohort wave-decision <spec-dir> [--wave <n>]
+                               [--force-sequential [<task-id>]] [--json]
     loop-cohort record-attempt <spec-dir> --phase implement
                                --cycle-id <run_id>:<seq> --expect-run-id <uuid>
+    loop-cohort dispatch-receipt <spec-dir> --task <task-id> --wave-index <n>
+                               (--receipt | --decline <reason>) --expect-run-id <uuid>
     loop-cohort wave check <spec-dir> --expect {more,last} [--wave-index <n>]
     loop-cohort wave advance <spec-dir> --from-index <n> --expect-run-id <uuid>
-    loop-cohort review inspect <spec-dir> --report <path> [--json]
-    loop-cohort review record <spec-dir> (--report <path>
+    loop-cohort wave reopen <spec-dir> --expect-run-id <uuid>
+    loop-cohort review classify --report <path> [--json]
+    loop-cohort review raw-classify --report <path> [--json]
+    loop-cohort review inspect <spec-dir> --report <path> [--adjudication] [--json]
+    loop-cohort review record <spec-dir> (--direct-clean-file <raw-report-path>
+                               | --structural-clean-file <raw-report-path>
+                               | --report <adjudication-report-path> --adjudication
                                | --fingerprint <hex> ...) --expect-run-id <uuid>
     loop-cohort status <spec-dir> [--json]
     loop-cohort reset <spec-dir>
@@ -40,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import fnmatch
 import functools
 import glob as _glob
@@ -54,6 +65,7 @@ import sys
 import tempfile
 from collections import defaultdict
 from pathlib import Path
+from typing import NamedTuple
 
 # Windows cp1252 guard — reconfigure stdout/stderr to UTF-8 before any print.
 sys.stdout.reconfigure(encoding="utf-8", errors="strict")
@@ -61,12 +73,16 @@ sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 TEMPLATE_PATH = SCRIPT_DIR.parent / "assets" / "state.json"
+SCHEMA_VERSION = 2
 
-PHASES = ("implement", "review", "gates-failed")
+# `wave-exit` is the phase the `wave-complete` transition consults. Nothing pins
+# this tuple, and the usage block above is a second, hand-maintained enumeration
+# of the same list — keep the two together.
+PHASES = ("implement", "review", "gates-failed", "wave-exit", "wave-reopen")
 WORKTREE_STATUSES = ("ready", "blocked", "failed")
-_MAX_MANAGED_JSON_BYTES = 8 * 1024 * 1024
 
 CLEAN_SUBSTRING = "Clean — ready to commit."
+INDETERMINATE_SENTINEL = "ADJUDICATION-INDETERMINATE"
 # Specialist reviewers (experience-reviewer, frontend-reviewer) emit "SHIP IT"
 # on its own line as their clean verdict instead of CLEAN_SUBSTRING.
 _SHIP_IT_RE = re.compile(r"^SHIP IT\s*$", re.MULTILINE)
@@ -80,38 +96,27 @@ _SHIP_IT_RE = re.compile(r"^SHIP IT\s*$", re.MULTILINE)
 _RE_FINGERPRINT = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 
-def _template_max_implementation_retries(fallback: int = 5) -> int:
-    """Read max_implementation_retries from the bundled state.json template."""
-    try:
-        return int(
-            json.loads(
-                TEMPLATE_PATH.read_text(encoding="utf-8")
-            )["max_implementation_retries"]
-        )
-    except (FileNotFoundError, OSError, KeyError, TypeError, ValueError):
-        return fallback
+# Control-character neutralisation for this tool's own diagnostics.
+#
+# A DELIBERATE copy of `_loop_guards._CONTROL_ESCAPES`, and the duplication is the
+# point: these lines fire on paths where the guard module may be unavailable or
+# unloadable, which is exactly when a diagnostic matters most. Reaching through the
+# loader here would make the sanitiser fail in the case it exists for.
+#
+# Not cosmetic. A refusal interpolates filenames and exception text that can originate
+# in a planted file — `_recover_engine_state_tmp` reads its name from a `glob()` — so a
+# `.engine-state-<ESC>[2J<ESC>[31mFAKE-OK.json.tmp` emitted a real screen-clear and
+# colour change into the stream a supervising agent captures and logs.
+_CONTROL_ESCAPES = str.maketrans({c: f"\\x{c:02x}" for c in [*range(32), 127]})
 
 
-def _template_max_review_retries(fallback: int = 5) -> int:
-    """Read max_review_retries from the bundled state.json template."""
-    try:
-        return int(
-            json.loads(
-                TEMPLATE_PATH.read_text(encoding="utf-8")
-            )["max_review_retries"]
-        )
-    except (FileNotFoundError, OSError, KeyError, TypeError, ValueError):
-        return fallback
-
-
-DEFAULTS: dict = {
-    "max_implementation_retries": _template_max_implementation_retries(),
-    "max_review_retries": _template_max_review_retries(),
-}
+def _diag(text: object) -> str:
+    """One-line, control-character-safe text for a warning or a refusal."""
+    return " ".join(str(text).split()).translate(_CONTROL_ESCAPES)
 
 
 def stop(reason: str, code: int = 1) -> int:
-    print(f"loop-cohort: stop — {reason}", file=sys.stderr)
+    print(f"loop-cohort: stop — {_diag(reason)}", file=sys.stderr)
     return code
 
 
@@ -119,92 +124,95 @@ def _disabled(verb: str) -> int:
     return stop(f"{verb} is disabled in Phase 1")
 
 
+def _emit(message: str | None) -> None:
+    """Print a guard's success message under THIS tool's prefix.
+
+    The prefix belongs to the adapter, not to the guard layer: the layer is shared by
+    `loop-cohort`, `loop-engine` and `check-spec-status`, so a prefix baked into a
+    `message` is wrong for two of the three callers — and when it was, the adapter's
+    own prefix doubled it (`check-spec-status: check-spec-status: ...`), which the
+    pre-change golden capture caught. Empty message means nothing to say.
+    """
+    if message:
+        print(f"loop-cohort: {_diag(message)}")
+
+
+# Matches `loop-engine.py`'s SUBPROCESS_TIMEOUT_S. Not derived from it — these are
+# separate scripts with no shared module — but deliberately the same number, so the
+# two files do not drift into disagreeing about how long a local git call may take.
+GIT_TIMEOUT_S = 20.0
+
+# Environment variables that could redirect git to a foreign repo root.
+_GIT_OVERRIDE_VARS = frozenset({
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+})
+
+# Resolved repository roots, keyed on the process working directory.
+#
+# `git rev-parse --show-toplevel` below takes no `cwd=`, so the working directory
+# is what decides its answer for any caller here. Keying on it, rather than
+# caching unconditionally, is what makes this safe in the pack's own harnesses:
+# they load this module by path, in-process, and chdir between throwaway
+# repositories. An unkeyed cache would hand the second repository the first one's
+# root, and that reaches `_resolve_spec_dir`'s confinement check as a silent wrong
+# answer rather than a crash.
+#
+# Successes only. A remembered failure would turn one transient timeout into a
+# permanent refusal for the life of the process, and would buy nothing — the
+# failure path already ends the run.
+_REPO_ROOT_CACHE: dict[str, Path] = {}
+
+
+def _get_repo_root() -> Path:
+    """Return the repository root without caller-controlled Git overrides."""
+    try:
+        # Inside the `try` deliberately: `Path.cwd()` raises FileNotFoundError
+        # when the working directory has been unlinked, and the contract below is
+        # that this function leaves only by ValueError.
+        cwd = str(Path.cwd())
+        cached = _REPO_ROOT_CACHE.get(cwd)
+        if cached is not None:
+            return cached
+        # Built after the cache check, so a hit does not pay for a filtered copy
+        # of the whole environment it never uses.
+        safe_env = {k: v for k, v in os.environ.items() if k not in _GIT_OVERRIDE_VARS}
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, encoding="utf-8", check=False,
+            env=safe_env, timeout=GIT_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        # The class, not one member of it — `PATH` holding a directory named
+        # `git` raises PermissionError, which reached this tool's callers as a
+        # 33-line traceback. Kept identical to `loop-engine.py`'s copy; the
+        # refusal text of both is asserted by
+        # `test_git_lookup_failure_refuses_boundedly_in_both_tools`.
+        raise ValueError(f"could not determine repo root: {exc}") from exc
+    if result.returncode != 0 or not result.stdout.strip():
+        raise ValueError("could not determine repo root (git rev-parse --show-toplevel failed)")
+    root = Path(result.stdout.strip()).resolve()
+    _REPO_ROOT_CACHE[cwd] = root
+    return root
+
+
 def _resolve_spec_dir(raw: str) -> Path:
-    """Resolve <spec-dir> to an absolute path; reject `..` traversal."""
-    p = Path(raw).resolve()
+    """Resolve and confine <spec-dir> to the current repository."""
     parts = Path(raw).parts
     if ".." in parts:
         raise ValueError(f"spec-dir must not contain '..': {raw!r}")
-    return p
-
-
-def state_path_for(spec_dir: Path) -> Path:
-    return spec_dir / "state.json"
-
-
-def _read_managed_json(path: Path, label: str) -> dict:
-    """Read a bounded regular JSON file without following or racing a symlink."""
+    resolved = Path(raw).resolve()
     try:
-        before = os.lstat(path)
-    except FileNotFoundError:
-        raise
-    except OSError as exc:
-        raise ValueError(f"{label} cannot be examined: {exc}") from exc
-    if not stat.S_ISREG(before.st_mode):
-        raise ValueError(f"{label} must be a regular file")
-    if before.st_size > _MAX_MANAGED_JSON_BYTES:
+        repo_root = _get_repo_root()
+    except ValueError as exc:
+        raise ValueError(f"spec-dir confinement check failed: {exc}") from exc
+    try:
+        resolved.relative_to(repo_root)
+    except ValueError as exc:
         raise ValueError(
-            f"{label} exceeds {_MAX_MANAGED_JSON_BYTES}-byte (8 MiB) limit"
-        )
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(path, flags)
-    except FileNotFoundError:
-        raise
-    except OSError as exc:
-        raise ValueError(f"{label} cannot be opened safely: {exc}") from exc
-    try:
-        try:
-            opened = os.fstat(fd)
-            if not stat.S_ISREG(opened.st_mode):
-                raise ValueError(f"{label} must be a regular file")
-            identity = (before.st_dev, before.st_ino)
-            if (opened.st_dev, opened.st_ino) != identity:
-                raise ValueError(f"{label} changed while being opened")
-            chunks: list[bytes] = []
-            remaining = _MAX_MANAGED_JSON_BYTES + 1
-            while remaining:
-                chunk = os.read(fd, min(64 * 1024, remaining))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            raw = b"".join(chunks)
-            after_fd = os.fstat(fd)
-        except OSError as exc:
-            raise ValueError(f"{label} could not be read safely: {exc}") from exc
-    finally:
-        os.close(fd)
-    try:
-        after_path = os.lstat(path)
-    except OSError as exc:
-        raise ValueError(f"{label} changed while being read") from exc
-    if (
-        (after_fd.st_dev, after_fd.st_ino) != identity
-        or (after_path.st_dev, after_path.st_ino) != identity
-    ):
-        raise ValueError(f"{label} changed while being read")
-    if len(raw) > _MAX_MANAGED_JSON_BYTES:
-        raise ValueError(
-            f"{label} exceeds {_MAX_MANAGED_JSON_BYTES}-byte (8 MiB) limit"
-        )
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"{label} is not valid UTF-8") from exc
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"{label} malformed: {exc.msg} at line {exc.lineno}") from exc
-    if not isinstance(data, dict):
-        raise ValueError(f"{label} root must be an object")
-    return data
-
-
-def read_state(spec_dir: Path) -> dict:
-    path = state_path_for(spec_dir)
-    try:
-        return _read_managed_json(path, "state.json")
-    except FileNotFoundError as exc:
-        raise FileNotFoundError(f"state.json missing at {path}") from exc
+            f"spec-dir must be inside the repository ({repo_root}): {raw!r}"
+        ) from exc
+    return resolved
 
 
 def write_state_atomic(spec_dir: Path, state: dict) -> None:
@@ -229,8 +237,7 @@ def write_state_atomic(spec_dir: Path, state: dict) -> None:
 # `write_state_atomic` makes each *write* atomic, but the read-modify-write
 # around it is not: two concurrent verbs each load a snapshot, both decide from
 # it, and the second replace drops the first's update — silently, with both
-# callers exiting 0. Reproduced at 20/20 trials; see
-# docs/specs/loop-cohort-state-lock/notes/reproduction.md.
+# callers exiting 0. Reproduced at 20/20 trials.
 #
 # `_statelock.py` is a work-loop script owned by this skill (ADR-0074):
 # stdlib-only, so it works where `agentbundle` is not installed. `agentbundle`
@@ -249,11 +256,19 @@ def _statelock():
     global _statelock_module
     if _statelock_module is None:
         lock_path = SCRIPT_DIR / "_statelock.py"
-        spec = importlib.util.spec_from_file_location("_statelock", str(lock_path))
-        if spec is None or spec.loader is None:
-            raise ImportError(f"loop-cohort: cannot load {lock_path}")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        # See the twin in `loop-engine.py`: bytecode writing is disabled across
+        # the load and restored to its PRIOR value, so a stale or poisoned
+        # `__pycache__` entry for the lock module cannot be executed here.
+        previous = sys.dont_write_bytecode
+        try:
+            sys.dont_write_bytecode = True
+            spec = importlib.util.spec_from_file_location("_statelock", str(lock_path))
+            if spec is None or spec.loader is None:
+                raise ImportError(f"loop-cohort: cannot load {lock_path}")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous
         _statelock_module = module
     return _statelock_module
 
@@ -302,42 +317,247 @@ def _locked(verb: str):
 
 
 def run_git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
+    """Run a git command, bounded.
+
+    `timeout=` is not currently load-bearing: this helper has no callers (verified
+    repo-wide), and it is unreachable while the ENGINE holds its lock, so it sits
+    outside that budget's arithmetic. It is bounded anyway because it is the nearest
+    copy-paste hazard to the guard extraction site — an unbounded `subprocess.run`
+    that a future caller inherits is how a lock-holding process learns to hang.
+
+    `TimeoutExpired` is left to propagate. Every current entry point is a CLI verb
+    that already turns an exception into a non-zero exit; swallowing it here would
+    invent a "git timed out so we continued" path that no caller asked for.
+    """
     return subprocess.run(
         ["git", *args],
         cwd=str(cwd) if cwd else None,
         capture_output=True,
         text=True,
         check=False,
+        timeout=GIT_TIMEOUT_S,
     )
 
 
-# ── hashing helpers ───────────────────────────────────────────────────────
-
-# Lazy handle on the sibling lint-spec-status.py. Status and acceptance-criterion
-# recognition has exactly one implementation in this repo — a shipped spec
-# (docs/specs/loop-approved-spec-state, Constrained by ADR-0061) requires every
-# status read to go through its `parse_status`, and a second copy of the AC
-# regexes is how the two silently disagree about what an AC line is.
-_lint_module: object | None = None
+# ── shared read-only guard API ─────────────────────────────────────────────
+#
+# The guard decisions, the bounded readers, the canonical-contract hashing and the
+# status parser loader all live in `_loop_guards.py` now, so `loop-engine.py` can
+# call them in-process instead of starting an interpreter per guard. This file keeps
+# its CLI surface and delegates the deciding.
 
 
-def _lint_spec_status():
-    global _lint_module
-    if _lint_module is None:
-        lint_path = Path(__file__).resolve().parent / "lint-spec-status.py"
-        spec = importlib.util.spec_from_file_location("_lint_spec_status", str(lint_path))
+class GuardsUnavailable(RuntimeError):
+    """`_loop_guards.py` could not be loaded; every verb must refuse."""
+
+
+_guards_module: object | None = None
+_guards_error: str | None = None
+
+
+def load_guards():
+    """Load the sibling `_loop_guards.py` by path, once per process.
+
+    ── This function body is identical in all three of `loop-cohort.py`,
+    ── `loop-engine.py` and `check-spec-status.py`. That is a decision, not an
+    ── accident: the loader cannot live in the module it loads, and importing this
+    ── 1500-line argparse CLI from `check-spec-status.py` just to borrow it is the
+    ── coupling the whole change exists to avoid.
+    ── `test_loader_copies_are_structurally_identical` compares the three ASTs and
+    ── keeps them from drifting.
+    ──
+    ── By path rather than `import _loop_guards`, matching `_statelock()`: a plain
+    ── import resolves under file-path invocation but not under the importlib-based
+    ── test harness, which does not put this directory on `sys.path`.
+    ──
+    ── NOT registered in `sys.modules`, also matching `_statelock()`. `exec_module`
+    ── does not remove a registered entry when the module body raises, so
+    ── registering would mean hand-rolling the failed-load cleanup that `import`
+    ── does for free — and would make the module a session-global singleton whose
+    ── memoised parser leaks between test files.
+    ──
+    ── `sys.dont_write_bytecode` is saved and restored to its PRIOR value, never to
+    ── `False`, so a host interpreter started with `-B` keeps its setting.
+    """
+    global _guards_module
+    if _guards_module is not None:
+        return _guards_module
+    path = SCRIPT_DIR / "_loop_guards.py"
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise GuardsUnavailable(
+            f"cannot load {path}: {exc}. Restore the file or re-run `make build-self`."
+        ) from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise GuardsUnavailable(
+            f"cannot load {path}: not a regular file (symlink or device). "
+            "Restore the file or re-run `make build-self`."
+        )
+    previous = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("_loop_guards", str(path))
         if spec is None or spec.loader is None:
-            raise ImportError(f"loop-cohort: cannot load {lint_path}")
+            raise GuardsUnavailable(f"cannot load {path}: no import spec")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        _lint_module = module
-    return _lint_module
+    except GuardsUnavailable:
+        raise
+    except BaseException as exc:
+        raise GuardsUnavailable(
+            f"cannot load {path}: {type(exc).__name__}: {exc}. Restore the file or "
+            "re-run `make build-self`."
+        ) from exc
+    finally:
+        sys.dont_write_bytecode = previous
+    if not getattr(module, "_MODULE_COMPLETE", False):
+        raise GuardsUnavailable(
+            f"cannot load {path}: module is truncated (no completeness marker). "
+            "Restore the file or re-run `make build-self`."
+        )
+    # AC13's completeness check: the module's OWN `__all__` is the contract, so it
+    # is never restated here. Three hand-enumerated copies drifted immediately —
+    # `check-spec-status.py`'s omitted `check_artifact_status`, the only function it
+    # calls — which is why an enumeration is explicitly rejected. A file truncated
+    # at a clean statement boundary loads WITHOUT raising, so `__all__` is present
+    # while the names it promises are not; that is the gap this closes.
+    exported = getattr(module, "__all__", None)
+    if not exported:
+        raise GuardsUnavailable(
+            f"cannot load {path}: module declares no __all__. Restore the file or "
+            "re-run `make build-self`."
+        )
+    missing = sorted(set(exported) - set(dir(module)))
+    if missing:
+        # Naming a few is diagnostic; naming all 21 makes a 450-char "one-line"
+        # refusal. The count carries the rest.
+        shown = ", ".join(missing[:5])
+        if len(missing) > 5:
+            shown += f" (+{len(missing) - 5} more)"
+        raise GuardsUnavailable(
+            f"cannot load {path}: incomplete module, missing {shown}. Restore the "
+            "file or re-run `make build-self`."
+        )
+    _guards_module = module
+    return _guards_module
 
 
-def _sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+def _guards_unavailable(*_args, **_kwargs):
+    """Bound in place of every relocated callable when the load fails.
+
+    RAISES rather than returning a reason. A stub that returned one would let a verb
+    which skipped the sentinel check keep going and write that string where a digest
+    belongs — `cmd_approve_plan` would store it as `approved_spec_hash`, and a later
+    drift comparison between two stub-produced values would compare *equal* and pass
+    vacuously. Raising when called is safe; only *import* must not raise.
+    """
+    raise GuardsUnavailable(_guards_error or "_loop_guards.py is unavailable")
 
 
+try:
+    _g = load_guards()
+except GuardsUnavailable as exc:
+    # Import must not raise: `test_loop_cohort_max_iter_single_source.py` reads
+    # `mod.DEFAULTS` straight after `exec_module` with no verb invoked, so the
+    # re-binds below have to execute. `main()` checks the sentinel at its single
+    # dispatch chokepoint and refuses before any verb body runs.
+    _g = None
+    _guards_error = str(exc)
+    GuardResult = None
+    DEFAULTS = {}
+    read_managed_json = read_managed_text = _guards_unavailable
+    read_state = state_path_for = _guards_unavailable
+    canonical_contract = sha256_canonical_contract = _guards_unavailable
+    read_md_status = assert_status_legal = validate_run_id = _guards_unavailable
+    _template_max_implementation_retries = _template_max_review_retries = _guards_unavailable
+    non_negative_int = _guards_unavailable
+    _scalar = _guards_unavailable
+    # Unreachable placeholders, deliberately unusable. `main()` refuses at its
+    # single dispatch chokepoint before any verb body runs, so nothing reads
+    # these; a real value here would be a SECOND declaration of a constant the
+    # guard layer single-sources, which is the drift the relocation removed.
+    RECEIPTS_KEY = ""
+    RECEIPT_KEY_PATH = ()
+    RECEIPT_KIND = DECLINE_KIND = ""
+    SUPERSEDED_KEY = ""
+    DECLINE_REASONS = ()
+    partition_digest = is_dispatch_record = _guards_unavailable
+    malformed_receipts_position = receipts_for_partition = _guards_unavailable
+    wave_is_well_formed = unaccounted_wave_tasks = _guards_unavailable
+    accounts_for_task = unaccounted_breakdown = _guards_unavailable
+    wave_accounting_summary = _guards_unavailable
+    bounded_id_list = _guards_unavailable
+    _lint_spec_status = _guards_unavailable
+    UnreadableArtifact = GuardsUnavailable
+    _BOTH_CAUSES = ""
+else:
+    # Re-bound at module level so no call site in this file changes, and so the
+    # existing tests that reach for these attributes keep working.
+    GuardResult = _g.GuardResult
+    DEFAULTS = _g.DEFAULTS
+    non_negative_int = _g.non_negative_int
+    # The guard layer's per-value length bound, reused rather than re-declared.
+    # This tool's own `_diag` neutralises control characters but applies NO length
+    # bound, so a state-derived value routed through it has no bound at all.
+    _scalar = _g._scalar
+    # The dispatch-receipt data model, re-bound rather than re-declared. Its one
+    # home is the guard layer: this CLI loads that module, and the module cannot
+    # load this CLI, so a declaration shared with `check --phase wave-exit` can
+    # only live on that side of the dependency.
+    RECEIPTS_KEY = _g.RECEIPTS_KEY
+    RECEIPT_KEY_PATH = _g.RECEIPT_KEY_PATH
+    RECEIPT_KIND = _g.RECEIPT_KIND
+    DECLINE_KIND = _g.DECLINE_KIND
+    DECLINE_REASONS = _g.DECLINE_REASONS
+    SUPERSEDED_KEY = _g.SUPERSEDED_KEY
+    partition_digest = _g.partition_digest
+    is_dispatch_record = _g.is_dispatch_record
+    malformed_receipts_position = _g.malformed_receipts_position
+    receipts_for_partition = _g.receipts_for_partition
+    wave_is_well_formed = _g.wave_is_well_formed
+    unaccounted_wave_tasks = _g.unaccounted_wave_tasks
+    accounts_for_task = _g.accounts_for_task
+    unaccounted_breakdown = _g.unaccounted_breakdown
+    wave_accounting_summary = _g.wave_accounting_summary
+    bounded_id_list = _g.bounded_id_list
+    read_managed_json = _read_managed_json = _g.read_managed_json
+    read_managed_text = _g.read_managed_text
+    read_state = _g.read_state
+    state_path_for = _g.state_path_for
+    canonical_contract = _g.canonical_contract
+    sha256_canonical_contract = _g.sha256_canonical_contract
+    read_md_status = _read_md_status = _g.read_md_status
+    assert_status_legal = _g.assert_status_legal
+    validate_run_id = _g.validate_run_id
+    UnreadableArtifact = _g.UnreadableArtifact
+    _lint_spec_status = _g._lint_spec_status
+    _template_max_implementation_retries = _g._template_max_implementation_retries
+    _template_max_review_retries = _g._template_max_review_retries
+    _BOTH_CAUSES = _g._BOTH_CAUSES
+
+
+def _validate_run_id(state: dict, expect_run_id: str, *, verb: str) -> int | None:
+    """CLI adapter: map the shared helper's reason to this tool's `stop()` contract.
+
+    Kept at this signature deliberately. Six mutation verbs call it, and rewriting
+    those call sites is outside this change — the `Ask first` rail covers a mutation
+    verb's body and accepted arguments, and refactoring a helper they share without
+    touching any of them sits outside it.
+    """
+    reason = validate_run_id(state, expect_run_id, verb=verb)
+    return None if reason is None else stop(reason)
+
+
+def _assert_status_legal(verb: str, *paths: Path) -> int | None:
+    """CLI adapter: map the shared helper's reason to this tool's `stop()` contract."""
+    reason = assert_status_legal(verb, *paths)
+    return None if reason is None else stop(reason)
+
+# Lazy handle on the sibling lint-spec-status.py. Status and acceptance-criterion
+# recognition has exactly one implementation in this repo — ADR-0061 requires
+# every status read to go through its `parse_status`, and a second copy of the
+# AC regexes is how the two silently disagree about what an AC line is.
 # The approved baseline pins the *scope a human approved*. It deliberately does
 # not pin the two field families this skill mandates writing after approval —
 # the preamble status token (SKILL.md: `Implementing` before code, `Shipped` at
@@ -347,171 +567,7 @@ def _sha256_bytes(data: bytes) -> str:
 #
 # Everything else stays pinned, including anything else on the status line: a
 # `- **Status:** Implementing — scope now also covers X` still moves the digest.
-_STATUS_PLACEHOLDER = "<loop-cohort:status>"
-# A heading, or the bold prose lead-in two specs here use instead. Missing the
-# latter would leave those specs with no normalization at all — i.e. AC5
-# failing for them by construction, the defect this spec exists to fix.
-_AC_HEADING_RE = re.compile(
-    r"^ {0,3}(?:#{2,3}\s+|\*\*)Acceptance\s+Criteria\b", re.IGNORECASE
-)
-# A region closes on the next heading at its own depth or shallower — a sibling
-# or an ancestor — and never on a deeper one. That single rule replaces the
-# hand-cased pair it grew out of: H3 subheadings sit inside H2-opened AC
-# sections all over this repo and must not close them, while an H3-opened
-# section is closed by the next H3, which a fixed `#{1,2}` test missed entirely.
-# A bold lead-in has no depth, so it takes _BOLD_DEPTH — deeper than any
-# heading, so every heading closes it — and also closes on the next bold lead-in,
-# without which it would run to EOF and un-pin every later checkbox, including a
-# `Never do` item, which is the scope the pin exists to protect.
-_HEADING_RE = re.compile(r"^ {0,3}(#{1,6})[ \t]")
-_BOLD_LEAD_RE = re.compile(r"^ {0,3}\*\*")
-_BOLD_DEPTH = 7
-
-# AC10: a mismatch has two possible causes and the verb cannot tell them apart,
-# so it names both rather than asserting the one that is usually wrong.
-_BOTH_CAUSES = (
-    "either the approved scope changed, or this baseline was pinned before "
-    "canonical hashing landed. For the second case, recover the cohort only: "
-    "(1) restore `Status: Approved` in BOTH spec.md and plan.md — approve-plan "
-    "refuses unless both read Approved; (2) `loop-cohort reset <spec-dir>`; "
-    "(3) `loop-cohort init <spec-dir> --run-id <run_id>`, taking run_id from "
-    "`loop-engine status <spec-dir> --json`; (4) `loop-cohort approve-plan "
-    "<spec-dir> --expect-run-id <run_id>` then `loop-cohort schedule <spec-dir> "
-    "--expect-run-id <run_id>`; "
-    "(5) restore the Status you were on. Do NOT run `loop-engine reset` — "
-    "`plan-locked` is legal only from SPEC-PLAN-APPROVED and the engine has no "
-    "state-setting verb, so resetting it strands the run. Note the reset clears "
-    "the retry counters and the stasis baseline, and re-running approve-plan "
-    "re-pins whatever is on disk, so it is a re-approval in substance"
-)
-
-
-def canonical_contract(text: str, *, ac_section_only: bool = True) -> str:
-    """Canonical form of spec.md / plan.md for approval pinning.
-
-    Normalizes exactly four things: CRLF/CR → LF; per-line trailing whitespace;
-    the preamble status *token*; and the bracket contents of a checkbox.
-    """
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = text.split("\n")
-
-    lint = _lint_spec_status()
-    # Newline-preserving comment strip. `parse_status` uses a plain sub() with
-    # re.DOTALL, which collapses a multiline comment to nothing and shifts every
-    # later line index — fine when you only want the token, wrong here, where
-    # the index has to map back to the raw line being rewritten.
-    cleaned = lint._HTML_COMMENT_RE.sub(
-        lambda m: "\n" * m.group(0).count("\n"), text
-    ).split("\n")
-
-    for i, cleaned_line in enumerate(cleaned):
-        if lint._SECTION_HEADING_RE.match(cleaned_line):
-            break  # preamble ends at the first section heading
-        if cleaned_line.lstrip().startswith("#"):
-            continue
-        if not lint._STATUS_RE.search(cleaned_line):
-            continue
-        # Rewrite the *raw* line, not the comment-stripped one.
-        raw = lines[i]
-        m = lint._STATUS_RE.search(raw)
-        if m is None:
-            break
-        token = lint.extract_status_token(m.group(1))
-        if token:
-            # Span-bounded splice of the token only. A str.replace would also
-            # rewrite the token where it recurs inside the trailing vocabulary
-            # comment (`<!-- Draft | Approved | Implementing | ... -->`) that
-            # every spec and plan the template emits carries — making each
-            # status normalize differently. Splicing _STATUS_RE's whole group(1) span
-            # would swallow appended free text and defeat the pin.
-            start = m.start(1)
-            lines[i] = raw[:start] + _STATUS_PLACEHOLDER + raw[start + len(token):]
-        break
-
-    # Which checkboxes count as bookkeeping depends on the artifact, so the
-    # caller says. A spec's progress marks live in its Acceptance Criteria
-    # section; a checkbox under `## Boundaries` is a `Never do` item, which is
-    # precisely the scope the pin protects. This is a forward invariant: no
-    # spec carries such a checkbox today.
-    # A plan has no such section: every checkbox in it is task progress, and
-    # four plans here carry them, so a plan is normalized file-wide.
-    #
-    # Case-insensitive on purpose: `lint-spec-status.py` matches `Acceptance
-    # Criteria` exactly, so its own AC extraction silently returns nothing for
-    # the specs that spell it with a lowercase `c`. Inheriting that bug here
-    # would break this normalization for exactly those specs. Tracked as
-    # `spec-ac-heading-casing-silent-gate`.
-    in_ac = not ac_section_only
-    opened_depth = _BOLD_DEPTH
-    fence_char = fence_len = None
-    for i, line in enumerate(lines):
-        # CommonMark fence semantics, not a toggle. A toggle desyncs on a
-        # nested fence — a ```toml inside a ```markdown example flips the state
-        # back — and one real plan in this tree has an odd fence count, which
-        # left the tracker stuck open and disabled normalization for the rest of
-        # the file. Only a bare run of the opening character, at least as long,
-        # closes; a line carrying an info string always opens.
-        stripped = line.lstrip()
-        marker = stripped[:1]
-        if marker in ("`", "~"):
-            run = len(stripped) - len(stripped.lstrip(marker))
-            info = stripped[run:].strip()
-            if fence_char is None:
-                if run >= 3:
-                    fence_char, fence_len = marker, run
-                    continue
-            elif marker == fence_char and run >= fence_len and not info:
-                fence_char = fence_len = None
-                continue
-        if fence_char is not None:
-            continue
-        if ac_section_only and _AC_HEADING_RE.match(line):
-            in_ac = True
-            opener = _HEADING_RE.match(line)
-            opened_depth = len(opener.group(1)) if opener else _BOLD_DEPTH
-            continue
-        if ac_section_only and in_ac:
-            closer = _HEADING_RE.match(line)
-            if (closer and len(closer.group(1)) <= opened_depth) or (
-                opened_depth == _BOLD_DEPTH and _BOLD_LEAD_RE.match(line)
-            ):
-                in_ac = False
-        if in_ac and lint._AC_DONE_RE.match(line):
-            # Bracket contents only — leading whitespace and the bullet run stay
-            # byte-for-byte, so re-indenting a criterion still moves the digest.
-            j = line.index("[")
-            lines[i] = line[:j + 1] + " " + line[j + 2:]
-
-    return "\n".join(line.rstrip() for line in lines)
-
-
-def sha256_canonical_contract(path: Path) -> str:
-    """SHA-256 of canonical_contract(<spec.md | plan.md>)."""
-    return _sha256_bytes(
-        canonical_contract(
-            path.read_text(encoding="utf-8"),
-            ac_section_only=(path.name != "plan.md"),
-        ).encode("utf-8")
-    )
-
-
 # ── run_id / schema_version validation ───────────────────────────────────
-
-
-def _validate_run_id(state: dict, expect_run_id: str, *, verb: str) -> int | None:
-    """Return None on success, or a stop() error code on schema/identity mismatch."""
-    sv = state.get("schema_version")
-    if sv != 1:
-        return stop(
-            f"{verb}: unsupported schema_version={sv!r} (expected 1); run reset pair"
-        )
-    stored = state.get("run_id")
-    if stored != expect_run_id:
-        return stop(
-            f"{verb}: --expect-run-id mismatch (stored={stored!r}, "
-            f"supplied={expect_run_id!r})"
-        )
-    return None
 
 
 # ── scheduler (wave-scheduled supervisor mode) ────────────────────────────
@@ -527,35 +583,1227 @@ _RANGE_RE = re.compile(r"(T\d+)\s*-\s*(T\d+)")
 _TASK_ID_RE = re.compile(r"T\d+[a-z]?")
 _CROSS_MARKER_RE = re.compile(r"spec:([A-Za-z0-9._-]+)/(T\d+[a-z]?)")
 _CROSS_LEGACY_RE = re.compile(r"`(?!T\d+[a-z]?`)([A-Za-z0-9._-]+)`\s*(T\d+[a-z]?)")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+MAX_AMENDMENT_REF_LENGTH = 1000
+MAX_AMENDMENT_EVIDENCE_REFS = 64
+MAX_TRANSITION_STATE_BYTES = 1024 * 1024
+RESET_PAIR_ORDER = "run `loop-cohort reset` then `loop-engine reset`"
+MAX_LEGACY_AMENDMENT_SEQUENCE_DERIVATION = 1_000_000
+_LEGACY_AMENDMENT_ID_RE = re.compile(r"\Aamendment-[0-9a-f]{64}\Z")
+
+
+def _local_dep_ids(field: str) -> set[str]:
+    """Local task IDs a `Depends on:` field names ahead of its first `(`.
+
+    Trailing parenthetical prose is authored commentary, not declaration, so the
+    field is truncated there. An ID written after that `(` is therefore not a
+    declared dependency for any caller: it is neither scheduled as an edge nor
+    reported as unknown. That is deliberate — widening it would change what
+    counts as a dependency for every caller of this helper, not just the
+    unknown-dependency check.
+    """
+    head = field.split("(")[0]
+    cleaned = _CROSS_MARKER_RE.sub("", head)
+    cleaned = _CROSS_LEGACY_RE.sub("", cleaned)
+    if not cleaned.strip() or re.fullmatch(r"\s*none\s*", cleaned, re.IGNORECASE):
+        return set()
+    ids: set[str] = set()
+    for lo, hi in _RANGE_RE.findall(cleaned):
+        ids.update(f"T{i}" for i in range(int(lo[1:]), int(hi[1:]) + 1))
+    ids.update(_TASK_ID_RE.findall(cleaned))
+    return ids
 
 
 def parse_depends_on(field: str, local_task_ids):
     """Parse a 'Depends on:' field value into local task IDs and cross-spec markers."""
     head = field.split("(")[0]
     cross = _CROSS_MARKER_RE.findall(head) + _CROSS_LEGACY_RE.findall(head)
-    cleaned = _CROSS_MARKER_RE.sub("", head)
-    cleaned = _CROSS_LEGACY_RE.sub("", cleaned)
-    if not cleaned.strip() or re.fullmatch(r"\s*none\s*", cleaned, re.IGNORECASE):
-        return set(), cross
-    ids: set[str] = set()
-    for lo, hi in _RANGE_RE.findall(cleaned):
-        ids.update(f"T{i}" for i in range(int(lo[1:]), int(hi[1:]) + 1))
-    ids.update(_TASK_ID_RE.findall(cleaned))
-    return {t for t in ids if t in local_task_ids}, cross
+    return {t for t in _local_dep_ids(field) if t in local_task_ids}, cross
+
+
+class _TaskSection(NamedTuple):
+    """One plan task's boundaries, as offsets into the plan text.
+
+    `start` opens the heading; `body_start` is just past it; `end` is where the
+    next task heading begins, or the end of the text for the final task.
+    """
+
+    task_id: str
+    start: int
+    body_start: int
+    end: int
+
+
+def walk_task_sections(text: str) -> list[_TaskSection]:
+    """Sole owner of the plan's task-section boundaries.
+
+    Every caller that needs to know which task owns a line resolves it here.
+    That is the point of the function rather than a convenience: the
+    unknown-dependency refusal in `detect_unknown_deps` must attribute a
+    `Depends on:` line to exactly the task `parse_plan` attributes it to. Were
+    the two to walk the boundaries separately and ever disagree, `schedule`
+    would refuse a plan it would otherwise have scheduled, or accept one whose
+    edges it then reads differently. Sharing the walk makes that agreement
+    structural instead of a coincidence maintained by hand.
+    """
+    matches = list(TASK_HEADING_RE.finditer(text))
+    return [
+        _TaskSection(
+            task_id=m.group(1),
+            start=m.start(),
+            body_start=m.end(),
+            end=matches[i + 1].start() if i + 1 < len(matches) else len(text),
+        )
+        for i, m in enumerate(matches)
+    ]
+
+
+def section_depends_field(text: str, section: _TaskSection) -> str | None:
+    """The raw `Depends on:` field value a task declares, or None.
+
+    Single-homed for the same reason as the walk above: the refusal and the
+    graph must read the same field text for the same task.
+    """
+    dm = DEPENDS_LINE_RE.search(text[section.body_start:section.end])
+    return dm.group(1) if dm else None
+
+
+def detect_unknown_deps(text: str, scan_task_ids: set[str] | None = None) -> list[tuple[str, str]]:
+    """Return (task, dep) pairs naming an ID the plan does not contain.
+
+    Dependencies always resolve against every task in `text`. `scan_task_ids`
+    restricts which tasks' declarations are read; None reads all of them.
+    """
+    sections = walk_task_sections(text)
+    # Resolution set: ALL task IDs in the plan — never narrowed by the caller.
+    resolution_set = {s.task_id for s in sections}
+    result: list[tuple[str, str]] = []
+    for section in sections:
+        if scan_task_ids is not None and section.task_id not in scan_task_ids:
+            continue
+        field = section_depends_field(text, section)
+        if field is None:
+            continue
+        unknown = _local_dep_ids(field) - resolution_set
+        for dep in sorted(unknown):
+            result.append((section.task_id, dep))
+    return sorted(result)
 
 
 def parse_plan(text: str):
     """Extract ordered task IDs and dependency map from plan.md text."""
-    matches = list(TASK_HEADING_RE.finditer(text))
-    ordered = [m.group(1) for m in matches]
+    sections = walk_task_sections(text)
+    ordered = [s.task_id for s in sections]
     taskset = set(ordered)
     deps: dict[str, set] = {}
-    for i, m in enumerate(matches):
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        dm = DEPENDS_LINE_RE.search(text[m.end():end])
-        local, _ = parse_depends_on(dm.group(1), taskset) if dm else (set(), [])
-        deps[m.group(1)] = local
+    for section in sections:
+        field = section_depends_field(text, section)
+        local, _ = parse_depends_on(field, taskset) if field is not None else (set(), [])
+        deps[section.task_id] = local
     return ordered, deps
+
+
+def _task_sections(text: str) -> dict[str, str]:
+    """Return exact authored task sections keyed by unique task ID."""
+    sections: dict[str, str] = {}
+    for section in walk_task_sections(text):
+        if section.task_id in sections:
+            raise ValueError(f"duplicate task section {section.task_id}")
+        raw = text[section.start:section.end].replace("\r\n", "\n").replace("\r", "\n")
+        canonical = "\n".join(line.rstrip() for line in raw.split("\n")).rstrip() + "\n"
+        sections[section.task_id] = canonical
+    return sections
+
+
+def task_section_hashes(text: str, task_ids: set[str]) -> dict[str, str]:
+    """Fingerprint completed task sections without normalising authored content."""
+    sections = _task_sections(text)
+    missing = sorted(task_ids - sections.keys())
+    if missing:
+        raise ValueError(f"completed task section missing: {', '.join(missing)}")
+    return {
+        task_id: hashlib.sha256(sections[task_id].encode("utf-8")).hexdigest()
+        for task_id in sorted(task_ids)
+    }
+
+
+def validate_completed_task_sections(plan_text: str, state: dict) -> str | None:
+    """Return a stable refusal when an amended plan rewrites completed work."""
+    completed = state.get("completed_task_ids", [])
+    pins = state.get("completed_task_section_hashes", {})
+    if not completed and not pins:
+        return None
+    if not isinstance(completed, list) or any(not isinstance(item, str) for item in completed):
+        return "completed_task_ids must be a list of task IDs"
+    if not isinstance(pins, dict) or set(pins) != set(completed):
+        return "completed task section pins do not match completed_task_ids"
+    try:
+        current = task_section_hashes(plan_text, set(completed))
+    except ValueError as exc:
+        return str(exc)
+    changed = [task_id for task_id in completed if current.get(task_id) != pins.get(task_id)]
+    if changed:
+        return f"completed task section changed: {', '.join(changed)}"
+    return None
+
+
+def schedule_unfinished_plan(plan_text: str, state: dict) -> list[list[str]]:
+    """Schedule only unfinished tasks while treating completed dependencies as met."""
+    pin_error = validate_completed_task_sections(plan_text, state)
+    if pin_error is not None:
+        raise ValueError(pin_error)
+    ordered, dependencies = parse_plan(plan_text)
+    completed = set(state.get("completed_task_ids", []))
+    remaining = [task_id for task_id in ordered if task_id not in completed]
+    if not remaining:
+        raise ValueError("amended plan has no unfinished task sections")
+    remaining_set = set(remaining)
+    remaining_dependencies = {
+        task_id: dependencies.get(task_id, set()) & remaining_set
+        for task_id in remaining
+    }
+    # Keyword argument, never positional: the set in scope here is the scan set,
+    # and resolving against it instead of the whole plan would refuse every
+    # amended plan whose dependency is already completed.
+    unknown = detect_unknown_deps(plan_text, scan_task_ids=remaining_set)
+    if unknown:
+        raise ValueError(
+            "dependency names no task in the plan: "
+            + ", ".join(f"{a}->{b}" for a, b in unknown)
+            + " — correct the ID in plan.md, or drop it from that task's"
+            " `Depends on:` line"
+        )
+    cycles = detect_cycles(remaining, remaining_dependencies)
+    if cycles:
+        raise ValueError(
+            "dependency cycle among unfinished tasks: " + ", ".join(cycles)
+        )
+    waves, _ = topological_waves(remaining, remaining_dependencies)
+    return waves
+
+
+def _bounded_amendment_ref(name: str, value: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} is required")
+    if len(value) > MAX_AMENDMENT_REF_LENGTH:
+        raise ValueError(f"{name} exceeds {MAX_AMENDMENT_REF_LENGTH} characters")
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError(f"{name} contains a control character")
+    return value
+
+
+def parse_completed_task_evidence_entries(
+    entries: tuple[str, ...], allowed_task_ids: set[str] | None = None
+) -> dict[str, list[str]]:
+    """Parse repeated `Tn=<stable-ref>` arguments into an auditable task map."""
+    if len(entries) > MAX_AMENDMENT_EVIDENCE_REFS:
+        raise ValueError(
+            f"completed_evidence_ref count exceeds {MAX_AMENDMENT_EVIDENCE_REFS}"
+        )
+    result: dict[str, list[str]] = {}
+    for entry in entries:
+        if not isinstance(entry, str) or "=" not in entry:
+            raise ValueError("completed_evidence_ref must use Tn=<stable-ref>")
+        task_id, raw_ref = entry.split("=", 1)
+        if not _TASK_ID_RE.fullmatch(task_id):
+            raise ValueError(
+                f"completed_evidence_ref has invalid task ID {task_id!r}"
+            )
+        if allowed_task_ids is not None and task_id not in allowed_task_ids:
+            raise ValueError(
+                f"completed_evidence_ref names non-completed task {task_id}"
+            )
+        reference = _bounded_amendment_ref("completed_evidence_ref", raw_ref)
+        bucket = result.setdefault(task_id, [])
+        if reference not in bucket:
+            bucket.append(reference)
+    return result
+
+
+def _normalize_completed_task_evidence_map(
+    mapping: dict[str, list[str]], allowed_task_ids: set[str]
+) -> dict[str, list[str]]:
+    if not isinstance(mapping, dict):
+        raise ValueError("completed_task_evidence must be a mapping")
+    entries: list[str] = []
+    for task_id, references in mapping.items():
+        if not isinstance(task_id, str):
+            raise ValueError("completed_task_evidence task ID must be a string")
+        if not isinstance(references, list) or not references:
+            raise ValueError(
+                f"completed_task_evidence[{task_id!r}] must be a non-empty list"
+            )
+        for reference in references:
+            if not isinstance(reference, str):
+                raise ValueError(
+                    f"completed_task_evidence[{task_id!r}] reference must be a string"
+                )
+            entries.append(f"{task_id}={reference}")
+    return parse_completed_task_evidence_entries(tuple(entries), allowed_task_ids)
+
+
+def _canonical_transition_args(args: dict) -> dict:
+    """Return JSON-canonical transition args for replay comparisons."""
+    return json.loads(
+        json.dumps(args, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    )
+
+
+def _contract_amendment_args(
+    owner_authority_ref: str,
+    reason_ref: str,
+    completed_task_evidence: dict[str, list[str]],
+) -> dict:
+    return _canonical_transition_args(
+        {
+            "owner_authority_ref": owner_authority_ref,
+            "reason_ref": reason_ref,
+            "completed_task_evidence": completed_task_evidence,
+        }
+    )
+
+
+def _legacy_contract_amendment_id(
+    run_id: str,
+    sequence: int,
+    owner_authority_ref: str,
+    reason_ref: str,
+    completed_task_evidence: dict[str, list[str]],
+) -> str:
+    evidence = json.dumps(
+        completed_task_evidence,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    material = (
+        f"{run_id}\0{sequence}\0{owner_authority_ref}\0{reason_ref}\0{evidence}"
+    )
+    return "amendment-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _derive_legacy_amendment_sequence(
+    *,
+    run_id: str,
+    amendment_id: str,
+    owner_authority_ref: str,
+    reason_ref: str,
+    completed_task_evidence: dict[str, list[str]],
+) -> int:
+    """Recover the pre-T3 engine sequence from the shipped amendment id."""
+    if not _LEGACY_AMENDMENT_ID_RE.fullmatch(amendment_id):
+        raise ValueError("legacy amendment_id is malformed")
+    for sequence in range(MAX_LEGACY_AMENDMENT_SEQUENCE_DERIVATION + 1):
+        if (
+            _legacy_contract_amendment_id(
+                run_id,
+                sequence,
+                owner_authority_ref,
+                reason_ref,
+                completed_task_evidence,
+            )
+            == amendment_id
+        ):
+            return sequence
+    raise ValueError("legacy amendment_id sequence could not be derived")
+
+
+def _transition_identity(
+    *,
+    transition_id: str,
+    pre_transition_sequence: int,
+    event: str,
+    args: dict,
+) -> dict:
+    if (
+        isinstance(pre_transition_sequence, bool)
+        or not isinstance(pre_transition_sequence, int)
+        or pre_transition_sequence < 0
+    ):
+        raise ValueError("pre_transition_sequence must be a non-negative integer")
+    return {
+        "transition_id": transition_id,
+        "pre_transition_sequence": pre_transition_sequence,
+        "event": event,
+        "args": _canonical_transition_args(args),
+    }
+
+
+def _same_transition_identity(left: dict | None, right: dict) -> bool:
+    """Compare durable transition identity, ignoring marker-only metadata."""
+    if left is None:
+        return False
+    return all(left.get(key) == right.get(key) for key in right)
+
+
+def _retained_transition_state(state: dict, newest_entry: dict) -> dict:
+    """Append newest history and trim oldest entries to the state byte ceiling."""
+    history = state.get("transition_history", [])
+    if not isinstance(history, list):
+        raise ValueError("transition_history must be a list")
+    retained = copy.deepcopy(state)
+    retained["transition_history"] = [*copy.deepcopy(history), newest_entry]
+    while True:
+        serialized_size = len(
+            json.dumps(
+                retained, ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
+        )
+        if serialized_size <= MAX_TRANSITION_STATE_BYTES:
+            return retained
+        if len(retained["transition_history"]) <= 1:
+            raise ValueError(
+                "transition history newest entry exceeds "
+                f"{MAX_TRANSITION_STATE_BYTES}-byte aggregate limit"
+            )
+        retained["transition_history"] = retained["transition_history"][1:]
+
+
+def _retained_existing_transition_state(state: dict) -> dict:
+    """Trim an already-appended history list against the exact candidate state."""
+    history = state.get("transition_history", [])
+    if not isinstance(history, list):
+        raise ValueError("transition_history must be a list")
+    if not history:
+        return copy.deepcopy(state)
+    retained = copy.deepcopy(state)
+    newest = retained["transition_history"][-1]
+    retained["transition_history"] = retained["transition_history"][:-1]
+    return _retained_transition_state(retained, newest)
+
+
+def _last_transition_status(
+    state: dict,
+    *,
+    transition_id: str,
+    pre_transition_sequence: int,
+    event: str,
+    args: dict,
+    spec_dir: Path | None = None,
+) -> str:
+    """Classify replay from the last durable history entry, not the marker."""
+    history = state.get("transition_history", [])
+    if not isinstance(history, list):
+        raise ValueError("transition_history must be a list")
+    if not history:
+        return "absent"
+    last = history[-1]
+    if last.get("pre_transition_sequence") != pre_transition_sequence:
+        return "absent"
+    expected = _transition_identity(
+        transition_id=transition_id,
+        pre_transition_sequence=pre_transition_sequence,
+        event=event,
+        args=args,
+    )
+    actual_args = _canonical_transition_args(last.get("args", {}))
+    identity_matches = (
+        last.get("transition_id") == expected["transition_id"]
+        and last.get("event") == expected["event"]
+        and actual_args == expected["args"]
+    )
+    if not identity_matches:
+        return "conflict"
+    if event == "contract-amendment":
+        snapshot_matches = (
+            last.get("owner_authority_ref") == args.get("owner_authority_ref")
+            and last.get("reason_ref") == args.get("reason_ref")
+            and state.get("completed_task_ids") == last.get("completed_task_ids")
+            and state.get("completed_task_section_hashes")
+            == last.get("completed_task_section_hashes")
+            and state.get("completed_task_evidence")
+            == last.get("completed_task_evidence")
+        )
+        if not snapshot_matches or spec_dir is None:
+            return "conflict"
+        try:
+            plan_text = read_managed_text(spec_dir / "plan.md", "plan.md")
+        except (OSError, UnicodeDecodeError, ValueError, ImportError):
+            return "conflict"
+        if validate_completed_task_sections(plan_text, state) is not None:
+            return "conflict"
+    return "applied"
+
+
+def begin_contract_amendment(
+    state: dict,
+    *,
+    expected_run_id: str,
+    owner_authority_ref: str,
+    reason_ref: str,
+    completed_task_section_hashes: dict[str, str],
+    completed_task_evidence: dict[str, list[str]],
+    amendment_id: str,
+    pre_transition_sequence: int,
+    retain_transition_history: bool = True,
+) -> dict:
+    """Return the cohort snapshot for one authorized, replay-safe amendment."""
+    if state.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError(
+            f"contract-amendment requires schema_version={SCHEMA_VERSION}; "
+            f"{RESET_PAIR_ORDER}"
+        )
+    if state.get("run_id") != expected_run_id:
+        raise ValueError("contract-amendment run_id mismatch")
+    owner_authority_ref = _bounded_amendment_ref(
+        "owner_authority_ref", owner_authority_ref
+    )
+    reason_ref = _bounded_amendment_ref("reason_ref", reason_ref)
+    amendment_id = _bounded_amendment_ref("amendment_id", amendment_id)
+    history = state.get("transition_history", [])
+    if not isinstance(history, list):
+        raise ValueError("transition_history must be a list")
+    if history and history[-1].get("transition_id") == amendment_id:
+        snapshot = history[-1]
+        stored_completed = state.get("completed_task_ids", [])
+        if not isinstance(stored_completed, list):
+            raise ValueError("completed_task_ids must be a list")
+        incoming_evidence = _normalize_completed_task_evidence_map(
+            completed_task_evidence, set(stored_completed)
+        )
+        snapshot_matches = (
+            snapshot.get("amendment_id") == amendment_id
+            and snapshot.get("owner_authority_ref") == owner_authority_ref
+            and snapshot.get("reason_ref") == reason_ref
+            and stored_completed == snapshot.get("completed_task_ids")
+            and state.get("completed_task_section_hashes")
+            == snapshot.get("completed_task_section_hashes")
+            and state.get("completed_task_evidence")
+            == snapshot.get("completed_task_evidence")
+        )
+        expected_pending = {
+            **_transition_identity(
+                transition_id=amendment_id,
+                pre_transition_sequence=snapshot.get("pre_transition_sequence"),
+                event="contract-amendment",
+                args=_contract_amendment_args(
+                    owner_authority_ref, reason_ref, incoming_evidence
+                ),
+            ),
+            "opened_at": snapshot.get("opened_at"),
+        }
+        if (
+            snapshot_matches
+            and state.get("plan_review_status") == "pending"
+            and state.get("schedule_waves") == []
+            and state.get("pending_transition") == expected_pending
+        ):
+            return copy.deepcopy(state)
+        raise ValueError("contract-amendment replay facts do not match stored state")
+    if state.get("plan_review_status") != "approved":
+        raise ValueError("contract-amendment requires an approved plan baseline")
+    for field in ("approved_spec_hash", "approved_plan_hash", "plan_hash"):
+        if not _SHA256_RE.fullmatch(str(state.get(field, ""))):
+            raise ValueError(f"contract-amendment requires a pinned {field}")
+
+    waves = state.get("schedule_waves", [])
+    current_index = state.get("current_wave_index", 0)
+    if (
+        not isinstance(waves, list)
+        or isinstance(current_index, bool)
+        or not isinstance(current_index, int)
+        or not 0 <= current_index < len(waves)
+    ):
+        raise ValueError("contract-amendment requires a current scheduled wave")
+    prior_completed = state.get("completed_task_ids", [])
+    if not isinstance(prior_completed, list):
+        raise ValueError("completed_task_ids must be a list")
+    newly_completed = [task for wave in waves[:current_index] for task in wave]
+    completed = list(dict.fromkeys([*prior_completed, *newly_completed]))
+    if set(completed_task_section_hashes) != set(completed):
+        raise ValueError("completed task section hashes do not match completed task IDs")
+    if any(
+        not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest)
+        for digest in completed_task_section_hashes.values()
+    ):
+        raise ValueError("completed task section hash must be SHA-256")
+
+    incoming_evidence = _normalize_completed_task_evidence_map(
+        completed_task_evidence, set(completed)
+    )
+    previous_evidence_raw = state.get("completed_task_evidence", {})
+    if previous_evidence_raw:
+        previous_evidence = _normalize_completed_task_evidence_map(
+            previous_evidence_raw, set(prior_completed)
+        )
+    else:
+        previous_evidence = {}
+    all_evidence = copy.deepcopy(previous_evidence)
+    for task_id, references in incoming_evidence.items():
+        bucket = all_evidence.setdefault(task_id, [])
+        for reference in references:
+            if reference not in bucket:
+                bucket.append(reference)
+    missing_evidence = sorted(set(completed) - set(all_evidence))
+    if missing_evidence:
+        raise ValueError(
+            "completed task has no evidence binding: " + ", ".join(missing_evidence)
+        )
+    evidence_count = sum(len(references) for references in all_evidence.values())
+    if evidence_count > MAX_AMENDMENT_EVIDENCE_REFS:
+        raise ValueError(
+            f"aggregate completed evidence exceeds {MAX_AMENDMENT_EVIDENCE_REFS} refs"
+        )
+    pending_args = _contract_amendment_args(
+        owner_authority_ref, reason_ref, incoming_evidence
+    )
+    snapshot = {
+        **_transition_identity(
+            transition_id=amendment_id,
+            pre_transition_sequence=pre_transition_sequence,
+            event="contract-amendment",
+            args=pending_args,
+        ),
+        "opened_at": None,
+        "amendment_id": amendment_id,
+        "owner_authority_ref": owner_authority_ref,
+        "reason_ref": reason_ref,
+        "approved_spec_hash": state["approved_spec_hash"],
+        "approved_plan_hash": state["approved_plan_hash"],
+        "plan_hash": state["plan_hash"],
+        "schedule_waves": copy.deepcopy(waves),
+        "current_wave_index": current_index,
+        "completed_task_ids": completed,
+        "completed_task_section_hashes": dict(completed_task_section_hashes),
+        "completed_task_evidence": all_evidence,
+    }
+    amended = copy.deepcopy(state)
+    amended.update(
+        {
+            "plan_review_status": "pending",
+            "approved_spec_hash": None,
+            "approved_plan_hash": None,
+            "plan_hash": None,
+            "schedule_waves": [],
+            "current_wave_index": 0,
+            # Emptied explicitly, not left to the digest. An amendment raised at
+            # wave index zero re-schedules to the same partition, so its digest is
+            # unchanged and a digest-keyed drop alone would leave every pre-
+            # amendment record still accounting for a task the amendment reopened.
+            RECEIPTS_KEY: {},
+            "completed_task_ids": completed,
+            "completed_task_section_hashes": dict(completed_task_section_hashes),
+            "completed_task_evidence": all_evidence,
+            "pending_transition": {
+                **_transition_identity(
+                    transition_id=amendment_id,
+                    pre_transition_sequence=pre_transition_sequence,
+                    event="contract-amendment",
+                    args=pending_args,
+                ),
+                "opened_at": None,
+            },
+        }
+    )
+    if retain_transition_history:
+        return _retained_transition_state(amended, snapshot)
+    updated = copy.deepcopy(amended)
+    history = updated.get("transition_history", [])
+    if not isinstance(history, list):
+        raise ValueError("transition_history must be a list")
+    updated["transition_history"] = [*history, snapshot]
+    return updated
+
+
+def complete_contract_amendment_reapproval(state: dict) -> dict:
+    """Clear only the replay marker after fresh plan approval is atomically pinned."""
+    if state.get("plan_review_status") != "approved":
+        raise ValueError("amendment replay marker clears only after plan approval")
+    for field in ("approved_spec_hash", "approved_plan_hash"):
+        if not _SHA256_RE.fullmatch(str(state.get(field, ""))):
+            raise ValueError(f"amendment replay marker requires pinned {field}")
+    approved = copy.deepcopy(state)
+    approved["pending_transition"] = None
+    return approved
+
+
+def apply_contract_amendment(
+    spec_dir: Path,
+    *,
+    expected_run_id: str,
+    owner_authority_ref: str,
+    reason_ref: str,
+    completed_task_evidence: dict[str, list[str]],
+    amendment_id: str,
+    pre_transition_sequence: int | None = None,
+) -> dict:
+    """Lock, derive completed-section pins, and persist one amendment snapshot."""
+    sl = _statelock()
+    with sl.exclusive(state_path_for(spec_dir)):
+        state = read_state(spec_dir)
+        if pre_transition_sequence is None:
+            pre_transition_sequence = _derive_legacy_amendment_sequence(
+                run_id=expected_run_id,
+                amendment_id=amendment_id,
+                owner_authority_ref=owner_authority_ref,
+                reason_ref=reason_ref,
+                completed_task_evidence=completed_task_evidence,
+            )
+        waves = state.get("schedule_waves", [])
+        current_index = state.get("current_wave_index", 0)
+        prior = state.get("completed_task_ids", [])
+        if not isinstance(waves, list) or not isinstance(current_index, int):
+            raise ValueError("contract-amendment requires a current scheduled wave")
+        newly_completed = [task for wave in waves[:current_index] for task in wave]
+        completed = list(dict.fromkeys([*prior, *newly_completed]))
+        history = state.get("transition_history", [])
+        if history and history[-1].get("transition_id") == amendment_id:
+            try:
+                plan_text = read_managed_text(spec_dir / "plan.md", "plan.md")
+            except (OSError, UnicodeDecodeError, ValueError, ImportError) as exc:
+                raise ValueError(
+                    f"contract-amendment cannot read plan.md: {exc}"
+                ) from exc
+            pin_error = validate_completed_task_sections(plan_text, state)
+            if pin_error is not None:
+                raise ValueError(f"contract-amendment replay refused: {pin_error}")
+            hashes = dict(state.get("completed_task_section_hashes", {}))
+        else:
+            try:
+                plan_text = read_managed_text(spec_dir / "plan.md", "plan.md")
+            except (OSError, UnicodeDecodeError, ValueError, ImportError) as exc:
+                raise ValueError(
+                    f"contract-amendment cannot read plan.md: {exc}"
+                ) from exc
+            hashes = task_section_hashes(plan_text, set(completed))
+        amended = begin_contract_amendment(
+            state,
+            expected_run_id=expected_run_id,
+            owner_authority_ref=owner_authority_ref,
+            reason_ref=reason_ref,
+            completed_task_section_hashes=hashes,
+            completed_task_evidence=completed_task_evidence,
+            amendment_id=amendment_id,
+            pre_transition_sequence=pre_transition_sequence,
+        )
+        if amended != state:
+            write_state_atomic(spec_dir, amended)
+        return amended
+
+
+def contract_amendment_replay_status(
+    spec_dir: Path,
+    *,
+    amendment_id: str,
+    owner_authority_ref: str,
+    reason_ref: str,
+    completed_task_evidence: dict[str, list[str]],
+    pre_transition_sequence: int | None = None,
+) -> str:
+    """Classify the cohort-first crash window without mutating state."""
+    args = _contract_amendment_args(
+        owner_authority_ref, reason_ref, completed_task_evidence
+    )
+    if pre_transition_sequence is None:
+        state = read_state(spec_dir)
+        pre_transition_sequence = _derive_legacy_amendment_sequence(
+            run_id=str(state.get("run_id")),
+            amendment_id=amendment_id,
+            owner_authority_ref=owner_authority_ref,
+            reason_ref=reason_ref,
+            completed_task_evidence=completed_task_evidence,
+        )
+    return transition_replay_status(
+        spec_dir,
+        transition_id=amendment_id,
+        pre_transition_sequence=pre_transition_sequence,
+        event="contract-amendment",
+        args=args,
+    )
+
+
+def _refuse_unappliable_effect(
+    state: dict, *, spec_dir: Path, identity: dict, marker: dict
+) -> None:
+    """Raise the effect's own refusal if applying it now could not succeed.
+
+    Mirrors `apply_transition_effect` against an in-memory copy and discards
+    the result. Registered effects are pure functions of state, plan text, and
+    identity, so this is a dry run that writes nothing.
+    """
+    status = _last_transition_status(
+        state,
+        transition_id=identity["transition_id"],
+        pre_transition_sequence=identity["pre_transition_sequence"],
+        event=identity["event"],
+        args=identity["args"],
+        spec_dir=spec_dir,
+    )
+    if status == "conflict":
+        raise ValueError("transition effect conflicts with cohort history")
+    if status == "applied":
+        return
+    candidate = copy.deepcopy(state)
+    candidate["pending_transition"] = marker
+    applied = _TRANSITION_EFFECTS[identity["event"]](
+        candidate,
+        spec_dir=spec_dir,
+        identity=identity,
+    )
+    applied["pending_transition"] = None
+    # Called for its refusal, not its value: this is where an oversized newest
+    # history entry raises, and apply would hit it too.
+    _retained_existing_transition_state(applied)
+
+
+def prepare_transition(
+    spec_dir: Path,
+    *,
+    transition_id: str,
+    pre_transition_sequence: int,
+    event: str,
+    args: dict,
+    opened_at: str,
+) -> str:
+    """Persist or validate a transition marker under the cohort lock."""
+    if event not in _TRANSITION_EFFECTS:
+        return "skipped"
+    identity = _transition_identity(
+        transition_id=transition_id,
+        pre_transition_sequence=pre_transition_sequence,
+        event=event,
+        args=args,
+    )
+    marker = {
+        **identity,
+        "opened_at": opened_at,
+    }
+    sl = _statelock()
+    with sl.exclusive(state_path_for(spec_dir)):
+        state = read_state(spec_dir)
+        if state.get("schema_version") != SCHEMA_VERSION:
+            raise ValueError(
+                f"prepare-transition requires schema_version={SCHEMA_VERSION}; "
+                f"{RESET_PAIR_ORDER}"
+            )
+        existing = state.get("pending_transition")
+        if _same_transition_identity(existing, identity):
+            return "prepared"
+        if existing is not None:
+            if existing.get("pre_transition_sequence") == pre_transition_sequence:
+                raise ValueError("pending transition conflicts with this sequence")
+            raise ValueError("pending transition already exists")
+        # Validate before the marker lands. A marker written for arguments the
+        # effect then refuses can never be replayed to success, and no verb
+        # discards it, so the run strands. Same lock acquisition, so state
+        # cannot move between the check and the write.
+        _refuse_unappliable_effect(
+            state, spec_dir=spec_dir, identity=identity, marker=marker
+        )
+        updated = copy.deepcopy(state)
+        updated["pending_transition"] = marker
+        write_state_atomic(spec_dir, updated)
+    return "prepared"
+
+
+def transition_replay_status(
+    spec_dir: Path,
+    *,
+    transition_id: str,
+    pre_transition_sequence: int,
+    event: str,
+    args: dict,
+) -> str:
+    """Classify a prepared or replayed transition without mutating cohort state."""
+    state = read_state(spec_dir)
+    if state.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError(
+            f"transition replay requires schema_version={SCHEMA_VERSION}; "
+            f"{RESET_PAIR_ORDER}"
+        )
+    return _last_transition_status(
+        state,
+        transition_id=transition_id,
+        pre_transition_sequence=pre_transition_sequence,
+        event=event,
+        args=args,
+        spec_dir=spec_dir,
+    )
+
+
+def _advance_wave_state(state: dict, *, from_index: int) -> tuple[dict, str]:
+    """Return state after a wave advance, or an unchanged idempotent replay."""
+    waves = state.get("schedule_waves", [])
+    if not isinstance(waves, list):
+        raise ValueError(
+            f"wave advance: schedule_waves is unusable ({_scalar(waves)}); run "
+            "schedule to persist a partition, or reset to rebuild cohort state"
+        )
+    n = len(waves)
+    if n == 0:
+        raise ValueError("wave advance: schedule_waves is empty")
+    if from_index < 0:
+        raise ValueError(f"wave advance: --from-index must be >= 0 (got {from_index})")
+    if from_index >= n:
+        raise ValueError(
+            f"wave advance: --from-index {from_index} >= len(schedule_waves) {n}"
+        )
+    if from_index == n - 1:
+        raise ValueError(
+            f"wave advance: cannot advance from the final wave (index={from_index}); "
+            "use gates-clean to exit the final wave"
+        )
+    idx = non_negative_int(state, "current_wave_index", 0)
+    if isinstance(idx, str):
+        raise ValueError(f"wave advance: {idx}; run reset to rebuild cohort state")
+    if idx == from_index + 1:
+        return copy.deepcopy(state), "already"
+    if idx != from_index:
+        raise ValueError(
+            f"wave advance: current_wave_index={idx} does not match "
+            f"--from-index {from_index} or {from_index + 1}"
+        )
+    malformed = malformed_receipts_position(state.get(RECEIPTS_KEY, {}))
+    if malformed is not None:
+        raise ValueError(
+            f"wave advance: {RECEIPTS_KEY} is malformed — expected {malformed} "
+            f"at the {'/'.join(RECEIPT_KEY_PATH)} key path; run reset to "
+            "rebuild cohort state"
+        )
+    if not wave_is_well_formed(waves[from_index]):
+        raise ValueError(
+            f"wave advance: schedule_waves[{from_index}] is malformed "
+            f"({_scalar(waves[from_index])}); expected a non-empty list of task "
+            "identifiers; run reset to rebuild cohort state"
+        )
+    unaccounted = unaccounted_wave_tasks(state, from_index)
+    if unaccounted:
+        raise ValueError(
+            f"wave advance: wave {from_index} has tasks with no live record — "
+            f"{unaccounted_breakdown(state, from_index)}; "
+            "run `loop-cohort dispatch-receipt` to record each"
+        )
+    updated = copy.deepcopy(state)
+    updated["current_wave_index"] = from_index + 1
+    return updated, "advanced"
+
+
+def _record_attempt_state(
+    state: dict, *, expected_run_id: str, cycle_id: str
+) -> tuple[dict, str]:
+    """Return state after recording one implementation attempt."""
+    parts = cycle_id.split(":", 1)
+    if len(parts) != 2 or not parts[1].isdigit():
+        raise ValueError(
+            f"record-attempt: --cycle-id must be '<run_id>:<decimal-sequence>' "
+            f"(got {cycle_id!r})"
+        )
+    run_id_prefix = parts[0]
+    if run_id_prefix != expected_run_id:
+        raise ValueError(
+            f"record-attempt: run_id prefix in --cycle-id ({run_id_prefix!r}) "
+            f"does not match --expect-run-id ({expected_run_id!r})"
+        )
+    if state.get("last_record_attempt_cycle_id") == cycle_id:
+        return copy.deepcopy(state), "already"
+    updated = copy.deepcopy(state)
+    updated["implementation_retry_count"] = (
+        int(updated.get("implementation_retry_count", 0)) + 1
+    )
+    updated["last_record_attempt_cycle_id"] = cycle_id
+    return updated, "recorded"
+
+
+def _record_review_state(
+    state: dict,
+    *,
+    expected_run_id: str,
+    spec_name: str,
+    form: str,
+    operation_id: str | None,
+    payload_digest: str | None,
+    fingerprints: list[str] | None = None,
+    clean_source: str | None = None,
+    clean_digest: str | None = None,
+    allow_retry_cap_override: bool = False,
+    allow_durable_operation_id: bool = False,
+) -> tuple[dict, str]:
+    """Return state after recording a review round through a shared mutator."""
+    outcome, reason = _review_operation_decision(
+        state,
+        operation_id,
+        payload_digest,
+        expect_run_id=expected_run_id,
+        spec_name=spec_name,
+        allow_durable_operation_id=allow_durable_operation_id,
+    )
+    if outcome == "refuse":
+        raise ValueError(str(reason))
+    if outcome == "already":
+        return copy.deepcopy(state), "already"
+    updated = copy.deepcopy(state)
+    if outcome == "record":
+        updated["last_review_record_operation_id"] = operation_id
+        updated["last_review_record_payload_digest"] = payload_digest
+    updated["previous_finding_fingerprints"] = list(
+        updated.get("finding_fingerprints", [])
+    )
+    rounds = non_negative_int(updated, "review_round_count", 0)
+    if isinstance(rounds, str):
+        raise ValueError(f"review record: {rounds} for {spec_name}")
+    if form == "findings":
+        stored_fingerprints = sorted(set(fingerprints or []))
+        retries = non_negative_int(updated, "review_retry_count", 0)
+        cap = non_negative_int(
+            updated, "max_review_retries", DEFAULTS["max_review_retries"]
+        )
+        if isinstance(retries, str):
+            raise ValueError(f"review record: {retries} for {spec_name}")
+        if isinstance(cap, str):
+            raise ValueError(f"review record: {cap} for {spec_name}")
+        if retries >= cap and not allow_retry_cap_override:
+            raise ValueError(
+                f"review record: review retry cap reached ({retries}/{cap}) for "
+                f"{spec_name}; a findings round past the cap is the runaway "
+                f"the cap exists to stop — stop and surface it. Only a human "
+                f"directing this run may continue: reset and start a new run, or "
+                f"pass --allow-retry-cap-override to this command AND to the "
+                f"`loop-engine transition findings-remain` that opens the round "
+                f"(either half alone leaves the cohort and the engine a round apart)"
+            )
+        updated["finding_fingerprints"] = stored_fingerprints
+        updated["review_retry_count"] = retries + 1
+        updated["review_round_count"] = rounds + 1
+        return updated, "recorded"
+    if form == "all-skipped":
+        updated["finding_fingerprints"] = []
+        updated["review_round_count"] = rounds + 1
+        return updated, "recorded"
+    if form == "clean":
+        updated["finding_fingerprints"] = []
+        updated["review_round_count"] = rounds + 1
+        updated["last_review_clean_source"] = clean_source
+        updated["last_review_clean_digest"] = clean_digest
+        return updated, "recorded"
+    raise ValueError(f"review record: unknown form {form!r}")
+
+
+def _append_transition_history(state: dict, identity: dict, audit: dict) -> dict:
+    entry = {**identity, **audit}
+    updated = copy.deepcopy(state)
+    history = updated.get("transition_history", [])
+    if not isinstance(history, list):
+        raise ValueError("transition_history must be a list")
+    updated["transition_history"] = [*history, entry]
+    return updated
+
+
+def _transition_effect_contract_amendment(
+    state: dict, *, spec_dir: Path, identity: dict
+) -> dict:
+    args = identity["args"]
+    completed_task_evidence = args.get("completed_task_evidence", {})
+    waves = state.get("schedule_waves", [])
+    current_index = state.get("current_wave_index", 0)
+    prior = state.get("completed_task_ids", [])
+    if not isinstance(waves, list) or not isinstance(current_index, int):
+        raise ValueError("contract-amendment requires a current scheduled wave")
+    newly_completed = [task for wave in waves[:current_index] for task in wave]
+    completed = list(dict.fromkeys([*prior, *newly_completed]))
+    try:
+        plan_text = read_managed_text(spec_dir / "plan.md", "plan.md")
+    except (OSError, UnicodeDecodeError, ValueError, ImportError) as exc:
+        raise ValueError(f"contract-amendment cannot read plan.md: {exc}") from exc
+    hashes = task_section_hashes(plan_text, set(completed))
+    return begin_contract_amendment(
+        state,
+        expected_run_id=str(state.get("run_id")),
+        owner_authority_ref=str(args.get("owner_authority_ref", "")),
+        reason_ref=str(args.get("reason_ref", "")),
+        completed_task_section_hashes=hashes,
+        completed_task_evidence=completed_task_evidence,
+        amendment_id=identity["transition_id"],
+        pre_transition_sequence=identity["pre_transition_sequence"],
+        retain_transition_history=False,
+    )
+
+
+def _transition_effect_wave_passed(
+    state: dict, *, spec_dir: Path, identity: dict
+) -> dict:
+    del spec_dir
+    raw_index = identity["args"].get("wave_index")
+    if raw_index is None:
+        raw_index = identity["args"].get("completed_wave_index")
+    if isinstance(raw_index, bool) or not isinstance(raw_index, int):
+        raise ValueError("wave-passed requires integer wave_index")
+    updated, _status = _advance_wave_state(state, from_index=raw_index)
+    return _append_transition_history(
+        updated,
+        identity,
+        {
+            "completed_wave_index": raw_index,
+            "current_wave_index": updated.get("current_wave_index"),
+        },
+    )
+
+
+def _transition_effect_gates_failed(
+    state: dict, *, spec_dir: Path, identity: dict
+) -> dict:
+    del spec_dir
+    cycle_id = f"{state.get('run_id')}:{identity['pre_transition_sequence']}"
+    updated, _status = _record_attempt_state(
+        state, expected_run_id=str(state.get("run_id")), cycle_id=cycle_id
+    )
+    return _append_transition_history(
+        updated,
+        identity,
+        {
+            "implementation_retry_count": updated.get("implementation_retry_count"),
+            "last_record_attempt_cycle_id": cycle_id,
+        },
+    )
+
+
+def _transition_effect_findings_remain(
+    state: dict, *, spec_dir: Path, identity: dict
+) -> dict:
+    args = identity["args"]
+    fingerprints = sorted(set(args.get("fingerprints", [])))
+    bad = [fp for fp in fingerprints if not _RE_FINGERPRINT.match(fp)]
+    if bad:
+        raise ValueError(
+            "review record: --fingerprint must be lowercase 64-char SHA-256 hex "
+            "(40-char SHA-1 still accepted for a run that predates core 2.3.0); "
+            f"invalid: {bad!r}"
+        )
+    digest = _review_payload_digest("fingerprint", "\n".join(fingerprints))
+    updated, status = _record_review_state(
+        state,
+        expected_run_id=str(state.get("run_id")),
+        spec_name=str(args.get("spec_name") or spec_dir.name),
+        form="findings",
+        operation_id=identity["transition_id"],
+        payload_digest=digest,
+        fingerprints=fingerprints,
+        allow_retry_cap_override=bool(args.get("allow_retry_cap_override", False)),
+        allow_durable_operation_id=True,
+    )
+    if status == "already":
+        fingerprints = sorted(set(updated.get("finding_fingerprints", [])))
+    return _append_transition_history(
+        updated,
+        identity,
+        {
+            "operation_id": identity["transition_id"],
+            "review_round_count": updated.get("review_round_count"),
+            "review_retry_count": updated.get("review_retry_count"),
+            "finding_fingerprints": fingerprints,
+        },
+    )
+
+
+def _transition_effect_reviewers_clean(
+    state: dict, *, spec_dir: Path, identity: dict
+) -> dict:
+    args = identity["args"]
+    if args.get("all_skipped", False):
+        form = "all-skipped"
+        digest = _review_payload_digest("all-skipped", "")
+        clean_source = None
+        clean_digest = None
+    else:
+        form = "clean"
+        clean_source = args.get("clean_source", "transition-clean")
+        clean_digest = args.get("clean_digest")
+        digest = (
+            None
+            if clean_digest is None
+            else _review_payload_digest(str(clean_source), str(clean_digest))
+        )
+    updated, status = _record_review_state(
+        state,
+        expected_run_id=str(state.get("run_id")),
+        spec_name=str(args.get("spec_name") or spec_dir.name),
+        form=form,
+        operation_id=identity["transition_id"],
+        payload_digest=digest,
+        clean_source=None if clean_source is None else str(clean_source),
+        clean_digest=None if clean_digest is None else str(clean_digest),
+        allow_durable_operation_id=True,
+    )
+    return _append_transition_history(
+        updated,
+        identity,
+        {
+            "operation_id": identity["transition_id"],
+            "review_round_count": updated.get("review_round_count"),
+            "last_review_clean_source": updated.get("last_review_clean_source"),
+            "last_review_clean_digest": updated.get("last_review_clean_digest"),
+        },
+    )
+
+
+_TRANSITION_EFFECTS = {
+    "contract-amendment": _transition_effect_contract_amendment,
+    "wave-passed": _transition_effect_wave_passed,
+    "gates-failed": _transition_effect_gates_failed,
+    "findings-remain": _transition_effect_findings_remain,
+    "reviewers-clean": _transition_effect_reviewers_clean,
+}
+
+
+def apply_transition_effect(
+    spec_dir: Path,
+    *,
+    transition_id: str,
+    pre_transition_sequence: int,
+    event: str,
+    args: dict,
+) -> str:
+    """Apply one registered cohort effect exactly once under the cohort lock."""
+    if event not in _TRANSITION_EFFECTS:
+        return "skipped"
+    identity = _transition_identity(
+        transition_id=transition_id,
+        pre_transition_sequence=pre_transition_sequence,
+        event=event,
+        args=args,
+    )
+    sl = _statelock()
+    with sl.exclusive(state_path_for(spec_dir)):
+        state = read_state(spec_dir)
+        if state.get("schema_version") != SCHEMA_VERSION:
+            raise ValueError(
+                f"apply-transition-effect requires schema_version={SCHEMA_VERSION}; "
+                f"{RESET_PAIR_ORDER}"
+            )
+        status = _last_transition_status(
+            state,
+            transition_id=transition_id,
+            pre_transition_sequence=pre_transition_sequence,
+            event=event,
+            args=args,
+            spec_dir=spec_dir,
+        )
+        if status == "conflict":
+            raise ValueError("transition effect conflicts with cohort history")
+        pending = state.get("pending_transition")
+        if pending is not None:
+            pending_identity = {
+                key: pending.get(key)
+                for key in ("transition_id", "pre_transition_sequence", "event", "args")
+            }
+            if pending_identity != identity:
+                raise ValueError("pending transition conflicts with this effect")
+        elif status == "absent":
+            raise ValueError("pending transition is required for absent effect")
+        if status == "applied":
+            if pending is not None:
+                updated = copy.deepcopy(state)
+                updated["pending_transition"] = None
+                write_state_atomic(spec_dir, updated)
+            return "applied"
+        updated = _TRANSITION_EFFECTS[event](
+            state,
+            spec_dir=spec_dir,
+            identity=identity,
+        )
+        updated["pending_transition"] = None
+        updated = _retained_existing_transition_state(updated)
+        write_state_atomic(spec_dir, updated)
+    return "applied"
 
 
 def parse_touches(field: str):
@@ -564,15 +1812,13 @@ def parse_touches(field: str):
 
 
 def parse_touches_by_task(text: str):
-    matches = list(TASK_HEADING_RE.finditer(text))
     out: dict[str, set] = {}
-    for i, m in enumerate(matches):
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        tm = TOUCHES_LINE_RE.search(text[m.end():end])
+    for section in walk_task_sections(text):
+        tm = TOUCHES_LINE_RE.search(text[section.body_start:section.end])
         if tm:
             globs = parse_touches(tm.group(1))
             if globs:
-                out[m.group(1)] = globs
+                out[section.task_id] = globs
     return out
 
 
@@ -661,10 +1907,13 @@ def detect_forward_refs(ordered, deps):
     ]
 
 
-# ── auto-classification helpers (kept; dispatch-decision verb disabled) ───
+# ── dispatch-classification helpers (dispatch-decision verb disabled) ────
 
 SAFE_CATEGORIES = frozenset({"cannot-collide", "typed-group-b", "textual-loud"})
 
+# Shared by the post-write classifier and the pre-dispatch wave-decision
+# screen. A regex change moves both decisions and needs review against both
+# test surfaces.
 _DANGER_PATH_RE = re.compile(
     r"(^|/)(poetry\.lock|package-lock\.json|Cargo\.lock|go\.sum|uv\.lock"
     r"|yarn\.lock|requirements\.txt|pyproject\.toml|package\.json|__init__\.py"
@@ -710,7 +1959,14 @@ def cmd_init(args: argparse.Namespace) -> int:
         )
     if not TEMPLATE_PATH.exists():
         return stop(f"template missing at {TEMPLATE_PATH}")
-    template = json.loads(TEMPLATE_PATH.read_text())
+    # Through the shared bounded reader, not a raw `read_text()`. `cmd_init` holds the
+    # state lock, so an unbounded read here has the same shape as the ones this change
+    # removed everywhere else: a replaced or oversized template would read without
+    # limit inside the critical section, and a symlinked one would be followed.
+    try:
+        template = read_managed_json(TEMPLATE_PATH, "state.json template")
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        return stop(f"init: {exc}")
     template["run_id"] = args.run_id
     template["feature"] = Path(spec_dir).resolve().name
     write_state_atomic(spec_dir, template)
@@ -722,28 +1978,18 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_identity(args: argparse.Namespace) -> int:
+    """CLI adapter over `check_identity`. Branches on `ok`, never on `reason`."""
     try:
         spec_dir = _resolve_spec_dir(args.spec_dir)
     except ValueError as exc:
         return stop(str(exc))
-    try:
-        state = read_state(spec_dir)
-    except (FileNotFoundError, ValueError) as exc:
-        return stop(str(exc))
-    if state.get("schema_version") != 1:
-        sv = state.get("schema_version")
-        return stop(f"identity: unsupported schema_version={sv!r} (expected 1)")
-    stored_run_id = state.get("run_id")
-    if args.expect_run_id is not None and stored_run_id != args.expect_run_id:
-        return stop(
-            f"identity: run_id mismatch (stored={stored_run_id!r}, "
-            f"expected={args.expect_run_id!r})"
-        )
-    result = {"run_id": stored_run_id, "schema_version": state.get("schema_version")}
+    result = _g.check_identity(spec_dir, expect_run_id=args.expect_run_id)
+    if not result.ok:
+        return stop(result.reason)
     if args.json:
-        print(json.dumps(result))
+        print(json.dumps(result.data))
     else:
-        print(f"loop-cohort: run_id={stored_run_id} schema_version={result['schema_version']}")
+        _emit(result.message)
     return 0
 
 
@@ -759,9 +2005,12 @@ def cmd_status(args: argparse.Namespace) -> int:
         state = read_state(spec_dir)
     except (FileNotFoundError, ValueError) as exc:
         return stop(str(exc))
-    if state.get("schema_version") != 1:
+    if state.get("schema_version") != SCHEMA_VERSION:
         sv = state.get("schema_version")
-        return stop(f"status: unsupported schema_version={sv!r} (expected 1)")
+        return stop(
+            f"status: unsupported schema_version={sv!r} "
+            f"(expected {SCHEMA_VERSION}); {RESET_PAIR_ORDER}"
+        )
     result = {
         "schema_version": state.get("schema_version"),
         "run_id": state.get("run_id"),
@@ -771,11 +2020,33 @@ def cmd_status(args: argparse.Namespace) -> int:
         "plan_hash": state.get("plan_hash"),
         "schedule_waves": state.get("schedule_waves", []),
         "current_wave_index": state.get("current_wave_index", 0),
+        "completed_task_ids": state.get("completed_task_ids", []),
+        "completed_task_section_hashes": state.get(
+            "completed_task_section_hashes", {}
+        ),
+        "completed_task_evidence": state.get("completed_task_evidence", {}),
+        "transition_history": state.get("transition_history", []),
+        "pending_transition": state.get("pending_transition"),
         "implementation_retry_count": state.get("implementation_retry_count", 0),
         "review_round_count": state.get("review_round_count", 0),
+        "last_review_record_operation_id": state.get("last_review_record_operation_id"),
+        "last_review_record_payload_digest": state.get("last_review_record_payload_digest"),
         "review_retry_count": state.get("review_retry_count", 0),
         "finding_fingerprints": state.get("finding_fingerprints", []),
         "previous_finding_fingerprints": state.get("previous_finding_fingerprints", []),
+        # Whether `check --phase wave-exit` enforces per-task accounting for this
+        # run. An absent container is the exemption, so absence is the one value
+        # that means "not enforced"; an empty container still enforces.
+        "dispatch_receipts_enforced": RECEIPTS_KEY in state,
+        # Per-wave accounting summary derived from the guard's declared predicate.
+        # One entry per wave in schedule_waves (None when that wave's accounting
+        # cannot be read), or [] when schedule_waves is not a list.
+        "wave_dispatch_accounting": (
+            [wave_accounting_summary(state, i)
+             for i in range(len(state.get("schedule_waves", [])))]
+            if isinstance(state.get("schedule_waves"), list)
+            else []
+        ),
     }
     if args.json:
         print(json.dumps(result))
@@ -783,6 +2054,355 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"loop-cohort status for {spec_dir.name}:")
         for k, v in result.items():
             print(f"  {k}: {v!r}")
+    return 0
+
+
+# ── wave-decision (read-only pre-dispatch screen) ─────────────────────────
+
+MAX_WAVE_DECISION_TASKS = 64
+MAX_WAVE_DECISION_TASK_ID_LENGTH = 64
+MAX_WAVE_DECISION_TOUCHES_PER_TASK = 64
+MAX_WAVE_DECISION_TOUCHES_PER_WAVE = 256
+MAX_WAVE_DECISION_TOUCH_GLOB_LENGTH = 256
+WAVE_DECISION_REFUSAL_DETAILS = {
+    "unsupported-state-schema-version": "cohort state schema is unsupported",
+    "state-unreadable": "cohort state could not be read",
+    "no-schedule": "cohort has no scheduled wave",
+    "state-malformed": "cohort state is malformed",
+    "plan-missing": "scheduled plan could not be found",
+    "plan-status-illegal": "scheduled plan status is illegal",
+    "plan-hash-stale": "scheduled plan hash is stale",
+    "wave-index-out-of-range": "requested wave index is out of range",
+    "empty-wave": "selected wave has no unfinished work",
+}
+
+
+def _emit_wave_refusal(args: argparse.Namespace, code: str, detail: str) -> int:
+    """Render this verb's deliberate JSON refusal envelope or human refusal."""
+    if args.json:
+        print(json.dumps({
+            "payload_version": 1,
+            "refusal": code,
+            "detail": WAVE_DECISION_REFUSAL_DETAILS[code],
+        }))
+        return 1
+    return stop(f"wave-decision: {code}: {detail}")
+
+
+def _wave_state_malformed(reason: str) -> tuple[str, str]:
+    return "state-malformed", reason
+
+
+def _valid_wave_task_id(task_id: object) -> bool:
+    return (
+        isinstance(task_id, str)
+        and len(task_id) <= MAX_WAVE_DECISION_TASK_ID_LENGTH
+        and _TASK_ID_RE.fullmatch(task_id) is not None
+    )
+
+
+def _normalise_wave_state(
+    state: dict, wave_arg: int | None
+) -> tuple[dict, tuple[str, str] | None]:
+    run_id = state.get("run_id")
+    if not isinstance(run_id, str) or run_id == "":
+        return {}, _wave_state_malformed("run_id must be a non-empty string")
+
+    waves = state.get("schedule_waves")
+    if "schedule_waves" not in state or waves == []:
+        return {}, ("no-schedule", "schedule_waves is absent or empty")
+    if not isinstance(waves, list):
+        return {}, _wave_state_malformed("schedule_waves must be a list")
+    for index, wave in enumerate(waves):
+        if not isinstance(wave, list) or any(not isinstance(task_id, str) for task_id in wave):
+            return {}, _wave_state_malformed(
+                f"schedule_waves[{index}] must be a list of task IDs"
+            )
+
+    completed = state.get("completed_task_ids", [])
+    if not isinstance(completed, list) or any(
+        not isinstance(task_id, str) for task_id in completed
+    ):
+        return {}, _wave_state_malformed("completed_task_ids must be a list of task IDs")
+
+    current = state.get("current_wave_index", 0)
+    if wave_arg is None:
+        if isinstance(current, bool) or not isinstance(current, int) or current < 0:
+            return {}, _wave_state_malformed(
+                "current_wave_index must be a non-negative integer"
+            )
+        wave_index = current
+    else:
+        wave_index = wave_arg
+    if wave_index < 0 or wave_index >= len(waves):
+        return {}, (
+            "wave-index-out-of-range",
+            f"wave_index={wave_index} is outside schedule_waves length {len(waves)}",
+        )
+
+    completed_set = set(completed)
+    wave = [task_id for task_id in waves[wave_index] if task_id not in completed_set]
+    if not wave:
+        return {}, ("empty-wave", "selected wave has no unfinished tasks")
+    if len(wave) != len(set(wave)):
+        return {}, _wave_state_malformed("unfinished wave contains duplicate task ID(s)")
+    bad_ids = [task_id for task_id in wave if not _valid_wave_task_id(task_id)]
+    if bad_ids:
+        return {}, _wave_state_malformed(
+            "unfinished wave contains invalid task ID(s): " + bounded_id_list(bad_ids)
+        )
+    if len(wave) > MAX_WAVE_DECISION_TASKS:
+        return {}, _wave_state_malformed(
+            f"unfinished wave has {len(wave)} tasks; maximum is {MAX_WAVE_DECISION_TASKS}"
+        )
+
+    return {
+        "wave_index": wave_index,
+        "wave": wave,
+    }, None
+
+
+def _validated_wave_touches(
+    plan_text: str, wave: list[str]
+) -> tuple[dict[str, list[str]], tuple[str, str] | None]:
+    """Return selected-wave effective touches after enforcing public budgets."""
+    parsed = parse_touches_by_task(plan_text)
+    touches = {task_id: sorted(parsed.get(task_id, set())) for task_id in wave}
+    total = 0
+    for task_id, globs in touches.items():
+        if len(globs) > MAX_WAVE_DECISION_TOUCHES_PER_TASK:
+            return {}, (
+                "plan-status-illegal",
+                (
+                    f"{task_id} declares {len(globs)} effective Touches globs; "
+                    f"maximum is {MAX_WAVE_DECISION_TOUCHES_PER_TASK}"
+                ),
+            )
+        for glob in globs:
+            if len(glob) > MAX_WAVE_DECISION_TOUCH_GLOB_LENGTH:
+                return {}, (
+                    "plan-status-illegal",
+                    (
+                        f"{task_id} declares an effective Touches glob longer than "
+                        f"{MAX_WAVE_DECISION_TOUCH_GLOB_LENGTH} characters"
+                    ),
+                )
+        total += len(globs)
+    if total > MAX_WAVE_DECISION_TOUCHES_PER_WAVE:
+        return {}, (
+            "plan-status-illegal",
+            (
+                f"selected wave declares {total} effective Touches globs; "
+                f"maximum is {MAX_WAVE_DECISION_TOUCHES_PER_WAVE}"
+            ),
+        )
+    return touches, None
+
+
+def _pair_relation(left: list[str], right: list[str]) -> str:
+    if not left or not right:
+        return "unknown"
+    if any(globs_overlap(a, b) for a in left for b in right):
+        return "overlapping"
+    return "disjoint"
+
+
+def _build_wave_decision(
+    *,
+    state: dict,
+    touches: dict[str, list[str]],
+    wave_index: int,
+    wave: list[str],
+    force_sequential: str | None,
+) -> dict:
+    force_all = force_sequential == "__all__"
+    admitted: list[str] = []
+    task_rows: list[dict] = []
+    # Admission and pair presentation need the same relation. Cache admission's
+    # work so the approved wave-wide touch budget bounds each task pair once.
+    pair_relations: dict[tuple[str, str], str] = {}
+
+    for task_id in wave:
+        task_globs = touches[task_id]
+        reasons: list[dict] = []
+        if not task_globs:
+            reasons.append({"code": "touches-undeclared"})
+        for glob in task_globs:
+            if _DANGER_PATH_RE.search(glob):
+                reasons.append({"code": "danger-path-declared", "glob": glob})
+        if force_all or force_sequential == task_id:
+            reasons.append({"code": "override-forced-sequential", "source": "cli"})
+
+        overlap_reason = None
+        for admitted_task in admitted:
+            pair_key = (admitted_task, task_id)
+            for glob in task_globs:
+                for admitted_glob in touches[admitted_task]:
+                    if globs_overlap(glob, admitted_glob):
+                        overlap_reason = {
+                            "code": "touches-overlap",
+                            "with": admitted_task,
+                            "globs": [glob, admitted_glob],
+                        }
+                        break
+                if overlap_reason is not None:
+                    break
+            if not task_globs or not touches[admitted_task]:
+                pair_relations[pair_key] = "unknown"
+            elif overlap_reason is not None:
+                pair_relations[pair_key] = "overlapping"
+            else:
+                pair_relations[pair_key] = "disjoint"
+            if overlap_reason is not None:
+                break
+        if overlap_reason is not None:
+            reasons.append(overlap_reason)
+        if not reasons:
+            admitted.append(task_id)
+
+        task_rows.append(
+            {
+                "task_id": task_id,
+                "touches": task_globs,
+                "disposition": "sequential" if reasons else "parallel-capable",
+                "reasons": reasons,
+            }
+        )
+
+    if len(admitted) < 2:
+        admitted_set = set(admitted)
+        for row in task_rows:
+            if row["task_id"] in admitted_set:
+                row["reasons"].append({"code": "no-admitted-peer"})
+                row["disposition"] = "sequential"
+        cohort: list[str] = []
+    else:
+        cohort = admitted
+
+    cohort_set = set(cohort)
+    serialized = [task_id for task_id in wave if task_id not in cohort_set]
+    if len(wave) == 1:
+        wave_disposition = "single-task"
+    elif len(cohort) == len(wave):
+        wave_disposition = "all-parallel-capable"
+    elif not cohort:
+        wave_disposition = "all-sequential"
+    else:
+        wave_disposition = "partially-parallel-capable"
+
+    pairs = []
+    for i, left in enumerate(wave):
+        for right in wave[i + 1:]:
+            relation = pair_relations.get((left, right))
+            if relation is None:
+                relation = _pair_relation(touches[left], touches[right])
+            pairs.append({
+                "tasks": [left, right],
+                "touches_relation": relation,
+            })
+
+    return {
+        "schema_version": state.get("schema_version"),
+        "payload_version": 1,
+        "run_id": state.get("run_id"),
+        "plan_hash": state.get("plan_hash"),
+        "wave_index": wave_index,
+        "wave": wave,
+        "wave_disposition": wave_disposition,
+        "cohort": cohort,
+        "serialized": serialized,
+        "admission_pending": True,
+        "tasks": task_rows,
+        "pairs": pairs,
+    }
+
+
+def _render_wave_decision_human(payload: dict) -> None:
+    print(f"loop-cohort wave-decision for wave {payload['wave_index']}:")
+    print(f"  wave_disposition: {payload['wave_disposition']}")
+    print(f"  admission_pending: {payload['admission_pending']}")
+    print(f"  cohort: {', '.join(payload['cohort']) if payload['cohort'] else '(none)'}")
+    print(
+        "  serialized: "
+        + (", ".join(payload["serialized"]) if payload["serialized"] else "(none)")
+    )
+    for row in payload["tasks"]:
+        reason_codes = [reason["code"] for reason in row["reasons"]]
+        suffix = f" reasons={','.join(reason_codes)}" if reason_codes else ""
+        print(f"  {row['task_id']}: {row['disposition']}{suffix}")
+
+
+def cmd_wave_decision(args: argparse.Namespace) -> int:
+    try:
+        spec_dir = _resolve_spec_dir(args.spec_dir)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return _emit_wave_refusal(args, "state-unreadable", str(exc))
+
+    identity = _g.check_identity(spec_dir, expect_run_id=None)
+    try:
+        state = read_state(spec_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        return _emit_wave_refusal(args, "state-unreadable", str(exc))
+    if not identity.ok:
+        code = (
+            "unsupported-state-schema-version"
+            if state.get("schema_version") != SCHEMA_VERSION
+            else "state-unreadable"
+        )
+        return _emit_wave_refusal(args, code, identity.reason)
+
+    normalised, refusal = _normalise_wave_state(state, args.wave)
+    if refusal is not None:
+        code, detail = refusal
+        return _emit_wave_refusal(args, code, detail)
+
+    schedule_current = _g.check_schedule_current(spec_dir, include_snapshot=True)
+    if not schedule_current.ok:
+        failure_kind = (schedule_current.data or {}).get("failure_kind")
+        code = {
+            "state-unreadable": "state-unreadable",
+            "plan-missing": "plan-missing",
+            "plan-status-illegal": "plan-status-illegal",
+            "plan-hash-stale": "plan-hash-stale",
+        }.get(failure_kind, "plan-status-illegal")
+        return _emit_wave_refusal(args, code, schedule_current.reason)
+
+    snapshot = schedule_current.data or {}
+    snapshot_state = snapshot.get("state")
+    plan_text = snapshot.get("plan_text")
+    if not isinstance(snapshot_state, dict) or not isinstance(plan_text, str):
+        return _emit_wave_refusal(
+            args,
+            "state-unreadable",
+            "schedule check-current returned no validated snapshot",
+        )
+    if snapshot_state.get("schema_version") != SCHEMA_VERSION:
+        return _emit_wave_refusal(
+            args,
+            "unsupported-state-schema-version",
+            "validated snapshot has an unsupported schema version",
+        )
+    normalised, refusal = _normalise_wave_state(snapshot_state, args.wave)
+    if refusal is not None:
+        code, detail = refusal
+        return _emit_wave_refusal(args, code, detail)
+
+    touches, touches_refusal = _validated_wave_touches(plan_text, normalised["wave"])
+    if touches_refusal is not None:
+        code, detail = touches_refusal
+        return _emit_wave_refusal(args, code, detail)
+
+    payload = _build_wave_decision(
+        state=snapshot_state,
+        touches=touches,
+        wave_index=normalised["wave_index"],
+        wave=normalised["wave"],
+        force_sequential=args.force_sequential,
+    )
+    if args.json:
+        print(json.dumps(payload))
+    else:
+        _render_wave_decision_human(payload)
     return 0
 
 
@@ -806,65 +2426,6 @@ def cmd_reset(args: argparse.Namespace) -> int:
 
 # ── approve-plan ──────────────────────────────────────────────────────────
 
-class UnreadableArtifact(Exception):
-    """The artifact exists but could not be read as UTF-8 markdown."""
-
-
-def _read_md_status(path: Path) -> str | None:
-    """Return the canonical status token, or None when the file has none.
-
-    None means "no status line", which callers legitimately skip. A file that
-    cannot be *read* is a different thing and must not be silently skipped —
-    it raises, so the caller stops with a reason instead of proceeding on a
-    guard that quietly did nothing.
-    """
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise UnreadableArtifact(f"{path.name}: {exc}") from exc
-    try:
-        return _lint_spec_status().parse_status(text)
-    except ImportError:
-        return None
-
-
-# Normalizing the status token out of the hash also removed the incidental
-# detection of a *regressed* status: an approved run whose spec.md went back to
-# Draft used to trip the byte compare. Assert it directly instead, at every verb
-# that reads a pinned artifact — a compensating control that covers one of three
-# call sites is not a compensating control.
-#
-# An absent or unparseable token is skipped, not stopped: plan fixtures
-# legitimately carry no status line, and this must not become a new way for a
-# CODE-* pre-guard to go red.
-_LEGAL_AFTER_APPROVAL = {
-    "spec.md": ("Approved", "Implementing", "Shipped"),
-    "plan.md": ("Approved", "Executing", "Done"),
-}
-
-
-def _assert_status_legal(verb: str, *paths: Path) -> int | None:
-    """Return a stop() code when a pinned artifact's status has regressed."""
-    for path in paths:
-        allowed = _LEGAL_AFTER_APPROVAL.get(path.name)
-        if allowed is None or not path.exists():
-            continue
-        try:
-            token = _read_md_status(path)
-        except UnreadableArtifact as exc:
-            return stop(f"{verb}: {exc}")
-        # `extract_status_token` returns "" — not None — when the value is only
-        # an HTML comment, so `is not None` would stop on it. AC9's promise is
-        # that an absent *or unparseable* token is skipped, and that promise is
-        # the whole safety argument for wiring this into a CODE-* pre-guard.
-        if token and token not in allowed:
-            return stop(
-                f"{verb}: {path.name} Status is {token!r}; expected one of "
-                f"{list(allowed)} after approval"
-            )
-    return None
-
-
 @_locked("approve-plan")
 def cmd_approve_plan(args: argparse.Namespace) -> int:
     try:
@@ -886,13 +2447,27 @@ def cmd_approve_plan(args: argparse.Namespace) -> int:
     if not plan_path.exists():
         return stop(f"approve-plan: plan.md not found at {plan_path}")
 
+    if state.get("completed_task_ids") or state.get("completed_task_section_hashes"):
+        try:
+            plan_text_for_pins = read_managed_text(plan_path, "plan.md")
+        except (OSError, UnicodeDecodeError, ValueError, ImportError) as exc:
+            return stop(f"approve-plan: cannot verify completed task sections: {exc}")
+        pin_error = validate_completed_task_sections(plan_text_for_pins, state)
+        if pin_error is not None:
+            return stop(f"approve-plan: {pin_error}")
+
     # Idempotency: if already approved, verify hashes before writing.
     current_status = state.get("plan_review_status", "pending")
     if current_status == "approved":
         try:
             spec_hash = sha256_canonical_contract(spec_path)
             plan_hash = sha256_canonical_contract(plan_path)
-        except (OSError, UnicodeDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, ValueError, ImportError) as exc:
+            # ValueError is the bounded reader's failure vocabulary (oversized,
+            # non-regular, symlinked, replaced mid-read). This verb holds the cohort
+            # state lock and `with_state_lock` catches only StateLockError, while
+            # `main()` catches only KeyboardInterrupt — so without this clause an
+            # unsafe artifact is a traceback out of a lock-holding process.
             return stop(f"approve-plan: cannot read the approved artifacts: {exc}")
         stored_spec_hash = state.get("approved_spec_hash", "")
         stored_plan_hash = state.get("approved_plan_hash", "")
@@ -903,6 +2478,17 @@ def cmd_approve_plan(args: argparse.Namespace) -> int:
             err = _assert_status_legal("approve-plan", spec_path, plan_path)
             if err is not None:
                 return err
+            if state.get("pending_transition") is not None:
+                try:
+                    state = complete_contract_amendment_reapproval(state)
+                except ValueError as exc:
+                    return stop(f"approve-plan: {exc}")
+                write_state_atomic(spec_dir, state)
+                print(
+                    "loop-cohort: approve-plan completed pending amendment "
+                    f"reapproval for {spec_dir.name}"
+                )
+                return 0
             print(
                 f"loop-cohort: approve-plan already recorded for {spec_dir.name} (no-op)"
             )
@@ -937,8 +2523,19 @@ def cmd_approve_plan(args: argparse.Namespace) -> int:
         )
 
     state["plan_review_status"] = "approved"
-    state["approved_spec_hash"] = sha256_canonical_contract(spec_path)
-    state["approved_plan_hash"] = sha256_canonical_contract(plan_path)
+    try:
+        state["approved_spec_hash"] = sha256_canonical_contract(spec_path)
+        state["approved_plan_hash"] = sha256_canonical_contract(plan_path)
+    except (OSError, UnicodeDecodeError, ValueError, ImportError) as exc:
+        # Previously unguarded, and it WRITES what it computes — so an unsafe
+        # artifact would either traceback out of the lock or, with a returning
+        # fallback stub, store a non-digest as the approved baseline.
+        return stop(f"approve-plan: cannot pin the approved artifacts: {exc}")
+    if state.get("pending_transition") is not None:
+        try:
+            state = complete_contract_amendment_reapproval(state)
+        except ValueError as exc:
+            return stop(f"approve-plan: {exc}")
     write_state_atomic(spec_dir, state)
     print(
         f"loop-cohort: approve-plan for {spec_dir.name} "
@@ -952,65 +2549,15 @@ def cmd_approve_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_plan_check_current(args: argparse.Namespace) -> int:
+    """CLI adapter over `check_plan_current`."""
     try:
         spec_dir = _resolve_spec_dir(args.spec_dir)
     except ValueError as exc:
         return stop(str(exc))
-    try:
-        state = read_state(spec_dir)
-    except (FileNotFoundError, ValueError) as exc:
-        return stop(str(exc))
-
-    if state.get("plan_review_status") != "approved":
-        return stop("plan_review_status: pending")
-
-    spec_path = spec_dir / "spec.md"
-    plan_path = spec_dir / "plan.md"
-    if not spec_path.exists():
-        return stop(f"plan check-current: spec.md not found at {spec_path}")
-    if not plan_path.exists():
-        return stop(f"plan check-current: plan.md not found at {plan_path}")
-
-    err = _assert_status_legal("plan check-current", spec_path, plan_path)
-    if err is not None:
-        return err
-
-    current_spec_hash = sha256_canonical_contract(spec_path)
-    if state.get("approved_spec_hash") != current_spec_hash:
-        return stop(
-            "plan check-current: spec.md no longer matches the approved baseline — "
-            + _BOTH_CAUSES
-            + f" (approved={state.get('approved_spec_hash', 'null')!r} "
-            f"current={current_spec_hash!r})"
-        )
-
-    current_plan_hash = sha256_canonical_contract(plan_path)
-    if state.get("approved_plan_hash") != current_plan_hash:
-        return stop(
-            "plan check-current: plan.md no longer matches the approved baseline — "
-            + _BOTH_CAUSES
-            + f" (approved={state.get('approved_plan_hash', 'null')!r} "
-            f"current={current_plan_hash!r})"
-        )
-
-    if args.require_schedule:
-        if state.get("plan_hash") != state.get("approved_plan_hash"):
-            return stop(
-                "plan check-current: plan_hash != approved_plan_hash "
-                "(schedule not run or run on a different plan version); "
-                + _BOTH_CAUSES
-            )
-        waves = state.get("schedule_waves", [])
-        if not waves:
-            return stop("plan check-current: schedule_waves is empty (run schedule first)")
-        idx = state.get("current_wave_index", 0)
-        if not (0 <= idx < len(waves)):
-            return stop(
-                f"plan check-current: current_wave_index={idx} out of range "
-                f"[0, {len(waves)})"
-            )
-
-    print(f"loop-cohort: plan check-current OK for {spec_dir.name}")
+    result = _g.check_plan_current(spec_dir, require_schedule=args.require_schedule)
+    if not result.ok:
+        return stop(result.reason)
+    _emit(result.message)
     return 0
 
 
@@ -1018,26 +2565,11 @@ def cmd_plan_check_current(args: argparse.Namespace) -> int:
 
 
 def _schedule_check_current_impl(spec_dir: Path) -> int:
-    try:
-        state = read_state(spec_dir)
-    except (FileNotFoundError, ValueError) as exc:
-        return stop(str(exc))
-    plan_path = spec_dir / "plan.md"
-    if not plan_path.exists():
-        return stop(f"schedule check-current: plan.md not found at {plan_path}")
-    err = _assert_status_legal("schedule check-current", plan_path)
-    if err is not None:
-        return err
-
-    current_hash = sha256_canonical_contract(plan_path)
-    stored = state.get("plan_hash")
-    if stored != current_hash:
-        return stop(
-            "schedule check-current: plan.md no longer matches the scheduled "
-            "baseline — " + _BOTH_CAUSES
-            + f" (stored={stored!r} current={current_hash!r})"
-        )
-    print(f"loop-cohort: schedule check-current OK for {spec_dir.name}")
+    """CLI adapter over `check_schedule_current`."""
+    result = _g.check_schedule_current(spec_dir)
+    if not result.ok:
+        return stop(result.reason)
+    _emit(result.message)
     return 0
 
 
@@ -1059,17 +2591,34 @@ def _schedule_run_impl(spec_dir: Path, expect_run_id: str, plan_override: str | 
     plan_path = plan_path_canonical
     if not plan_path.exists():
         return stop(f"plan not found at {plan_path}")
-    plan_text = plan_path.read_text(encoding="utf-8")
+    try:
+        plan_text = read_managed_text(plan_path, "plan.md")
+    except (OSError, UnicodeDecodeError, ValueError, ImportError) as exc:
+        # Was a raw `read_text()` under `@_locked("schedule")`: unbounded, symlink-
+        # following, and a FIFO here blocked the cohort lock until it went stale.
+        return stop(f"schedule: cannot read {plan_path.name}: {exc}")
     ordered, deps = parse_plan(plan_text)
     if not ordered:
         return stop(f"no '## T<n>' or '### T<n>' tasks found in {plan_path}")
 
-    cyc = detect_cycles(ordered, deps)
-    if cyc:
-        return stop(
-            f"dependency cycle among tasks: {', '.join(cyc)} — unschedulable; "
-            "the plan is wrong, fix Depends on:"
-        )
+    pin_error = validate_completed_task_sections(plan_text, state)
+    if pin_error is not None:
+        return stop(f"schedule: {pin_error}")
+    completed = set(state.get("completed_task_ids", []))
+    if completed:
+        ordered = [task_id for task_id in ordered if task_id not in completed]
+        if not ordered:
+            return stop("schedule: amended plan has no unfinished task sections")
+        remaining = set(ordered)
+        deps = {
+            task_id: deps.get(task_id, set()) & remaining
+            for task_id in ordered
+        }
+
+    try:
+        waves = schedule_unfinished_plan(plan_text, state)
+    except ValueError as exc:
+        return stop(f"schedule: {exc}")
     fwd = detect_forward_refs(ordered, deps)
     if fwd:
         pairs = ", ".join(f"{a}->{b}" for a, b in fwd)
@@ -1079,7 +2628,6 @@ def _schedule_run_impl(spec_dir: Path, expect_run_id: str, plan_override: str | 
             file=sys.stderr,
         )
 
-    waves, _ = topological_waves(ordered, deps)
     touches = parse_touches_by_task(plan_text)
     print(
         f"loop-cohort: topological order for {spec_dir.name} "
@@ -1094,14 +2642,30 @@ def _schedule_run_impl(spec_dir: Path, expect_run_id: str, plan_override: str | 
                 "(Touches: screen — serialize-only, never a greenlight)"
             )
 
-    plan_hash = sha256_canonical_contract(plan_path)
+    try:
+        plan_hash = sha256_canonical_contract(plan_path)
+    except (OSError, UnicodeDecodeError, ValueError, ImportError) as exc:
+        return stop(f"schedule: cannot hash {plan_path.name}: {exc}")
     state["plan_hash"] = plan_hash
     state["schedule_waves"] = waves
     state["current_wave_index"] = 0
+    # Creates the container when absent (cohort state written before receipts
+    # existed) and keeps only the live partition's records. `plan_hash` moves on
+    # any plan edit; the digest moves only when the partition does, so an edit
+    # that leaves the waves alone leaves every existing record accounting.
+    state[RECEIPTS_KEY] = receipts_for_partition(
+        state.get(RECEIPTS_KEY), partition_digest(waves)
+    )
     write_state_atomic(spec_dir, state)
     print(
         f"loop-cohort: schedule persisted for {spec_dir.name} "
         f"({len(waves)} wave(s), plan_hash={plan_hash[:12]}…)"
+    )
+    print(
+        "loop-cohort: dispatch — send each task above to one implementer subagent, one\n"
+        "  at a time, when that agent is installed; otherwise run them yourself and note\n"
+        "  the degradation in the final summary. Scheduling, gates, review and state\n"
+        "  stay with you."
     )
     return 0
 
@@ -1136,90 +2700,43 @@ def cmd_schedule(args: argparse.Namespace) -> int:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
+    """CLI adapter over `check_phase`.
+
+    Note the guard reads state for EVERY phase including `implement` — this verb has
+    always refused on a missing or malformed `state.json` before reaching the
+    `implement` stub, and the always-run pre-PR hook, which runs that phase for
+    every spec directory, depends on that.
+
+    `--phase wave-exit` is the phase the engine's `wave-complete` guard consults.
+    Run it directly before firing that transition: on a state with no receipts
+    container it PASSES with a notice on stdout, and the engine cannot surface
+    that notice, because a passing guard carries no `reason`.
+    """
     try:
         spec_dir = _resolve_spec_dir(args.spec_dir)
     except ValueError as exc:
         return stop(str(exc))
-    try:
-        state = read_state(spec_dir)
-    except (FileNotFoundError, ValueError) as exc:
-        return stop(str(exc))
-    # The `implement` phase is a no-op stub (returns 0 for any state); skip
-    # schema validation there so pre-Phase-1 state files don't break the hook.
-    # For phases that actually evaluate counters, reject incompatible state.
-    if args.phase != "implement" and state.get("schema_version") != 1:
-        sv = state.get("schema_version")
-        return stop(f"check: unsupported schema_version={sv!r} (expected 1); run reset pair")
-    return _evaluate(state, args.phase)
+    result = _g.check_phase(spec_dir, phase=args.phase)
+    if not result.ok:
+        return stop(result.reason)
+    _emit(result.message)
+    return 0
 
 
-def _evaluate(state: dict, phase: str) -> int:
-    if phase == "implement":
-        # Phase-1 compatibility stub: exits 0 unconditionally for any
-        # valid Phase-1 state. Token-budget and same-error fields are
-        # Phase-2 reserved — no Phase-1 writers or guards defined.
-        return 0
-
-    if phase == "gates-failed":
-        count = int(state.get("implementation_retry_count", 0))
-        cap = int(state.get("max_implementation_retries", DEFAULTS["max_implementation_retries"]))
-        if count >= cap:
-            return stop(
-                f"implementation retry cap reached ({count}/{cap}); "
-                "reset and start a new run"
-            )
-        return 0
-
-    if phase == "review":
-        count = int(state.get("review_retry_count", 0))
-        cap = int(state.get("max_review_retries", DEFAULTS["max_review_retries"]))
-        if count >= cap:
-            return stop(
-                f"review retry cap reached ({count}/{cap}); "
-                "reset and start a new run"
-            )
-        return 0
-
-    return stop(f"unknown phase {phase!r}")
-
-
-# ── wave check / advance ──────────────────────────────────────────────────
+# ── wave check / advance / reopen ─────────────────────────────────────────
 
 
 def cmd_wave_check(args: argparse.Namespace) -> int:
+    """CLI adapter over `check_wave`."""
     try:
         spec_dir = _resolve_spec_dir(args.spec_dir)
     except ValueError as exc:
         return stop(str(exc))
-    try:
-        state = read_state(spec_dir)
-    except (FileNotFoundError, ValueError) as exc:
-        return stop(str(exc))
-
-    waves = state.get("schedule_waves", [])
-    idx = int(state.get("current_wave_index", 0))
-    n = len(waves)
-
-    # Optional index check (used by wave-passed guard)
-    if args.wave_index is not None and idx != args.wave_index:
-        return stop(
-            f"wave check: current_wave_index={idx} does not match "
-            f"--wave-index {args.wave_index}"
-        )
-
-    if args.expect == "more":
-        if idx < n - 1:
-            print(f"loop-cohort: wave check more — wave_index={idx} has more waves (total={n})")
-            return 0
-        return stop(f"wave check more: no more waves (current={idx}, total={n})")
-
-    if args.expect == "last":
-        if idx == n - 1:
-            print(f"loop-cohort: wave check last — wave_index={idx} is the last wave (total={n})")
-            return 0
-        return stop(f"wave check last: not the last wave (current={idx}, total={n})")
-
-    return stop(f"wave check: unknown --expect value {args.expect!r}")
+    result = _g.check_wave(spec_dir, expect=args.expect, wave_index=args.wave_index)
+    if not result.ok:
+        return stop(result.reason)
+    _emit(result.message)
+    return 0
 
 
 @_locked("wave advance")
@@ -1237,41 +2754,272 @@ def cmd_wave_advance(args: argparse.Namespace) -> int:
         return err
 
     n_arg = args.from_index
-    waves = state.get("schedule_waves", [])
-    n = len(waves)
-
-    if n == 0:
-        return stop("wave advance: schedule_waves is empty")
-    if n_arg < 0:
-        return stop(f"wave advance: --from-index must be >= 0 (got {n_arg})")
-    if n_arg >= n:
-        return stop(
-            f"wave advance: --from-index {n_arg} >= len(schedule_waves) {n}"
-        )
-    if n_arg == n - 1:
-        return stop(
-            f"wave advance: cannot advance from the final wave (index={n_arg}); "
-            "use gates-clean to exit the final wave"
-        )
-
-    idx = int(state.get("current_wave_index", 0))
-    if idx == n_arg:
-        state["current_wave_index"] = n_arg + 1
-        write_state_atomic(spec_dir, state)
+    try:
+        updated, status = _advance_wave_state(state, from_index=n_arg)
+    except ValueError as exc:
+        return stop(str(exc))
+    if status == "advanced":
+        write_state_atomic(spec_dir, updated)
         print(
             f"loop-cohort: wave advance {n_arg} → {n_arg + 1} for {spec_dir.name}"
         )
         return 0
-    if idx == n_arg + 1:
+    if status == "already":
+        idx = updated.get("current_wave_index")
         print(
             f"loop-cohort: wave advance already applied "
             f"(current_wave_index={idx}) for {spec_dir.name}"
         )
         return 0
-    return stop(
-        f"wave advance: current_wave_index={idx} does not match "
-        f"--from-index {n_arg} or {n_arg + 1}"
+    return stop(f"wave advance: unexpected state mutator status {status!r}")
+
+
+# ── dispatch receipts ─────────────────────────────────────────────────────
+
+
+# The data model — `RECEIPTS_KEY`, `RECEIPT_KEY_PATH`, the closed kind and reason
+# sets, `SUPERSEDED_KEY`, `partition_digest`, `is_dispatch_record`,
+# `accounts_for_task`, `unaccounted_breakdown`, `malformed_receipts_position`,
+# `receipts_for_partition`,
+# `wave_is_well_formed`, `unaccounted_wave_tasks` and `bounded_id_list` — is
+# declared once in `_loop_guards.py` and re-bound at the top of this file.
+# `check --phase wave-exit` and this verb have to agree about the container key,
+# the record shape and what "accounted for" means, and the guard layer is the
+# only side of the dependency both can reach.
+
+
+def plan_dispatch_receipt(
+    state: dict,
+    *,
+    task_id: str,
+    wave_index: object,
+    receipt: bool,
+    decline: object,
+) -> tuple[dict | None, str | None]:
+    """Validate one dispatch receipt and return the state to persist.
+
+    Returns `(new_state, None)` on acceptance or `(None, reason)` on refusal, in
+    refuse-cheapest-first order: mutual exclusivity, reason code, index type and
+    range, usable partition, task membership. Pure — the caller owns the lock and
+    the write — so every refusal leaves `state.json` byte-identical.
+
+    The run identifier and the schema are validated by the caller through the
+    shared `validate_run_id`, which is cheaper still and shared with every other
+    run-scoped mutation.
+    """
+    if receipt and decline is not None:
+        return None, (
+            "dispatch-receipt: --receipt and --decline are mutually exclusive; "
+            "record one assertion per task"
+        )
+    if not receipt and decline is None:
+        return None, (
+            "dispatch-receipt: one of --receipt or --decline "
+            f"{list(DECLINE_REASONS)} is required"
+        )
+    if decline is not None and decline not in DECLINE_REASONS:
+        return None, (
+            f"dispatch-receipt: --decline {_scalar(decline)} is not an accepted "
+            f"reason; accepted: {', '.join(DECLINE_REASONS)}"
+        )
+
+    # Reuses the guard layer's non-negative-integer validation rather than adding a
+    # second integer predicate: that one rejects `bool` (which `isinstance(v, int)`
+    # accepts) and owns its message shape. The dict is the shape that helper reads.
+    index = non_negative_int({"--wave-index": wave_index}, "--wave-index", 0)
+    if isinstance(index, str):
+        return None, f"dispatch-receipt: {index}"
+
+    waves = state.get("schedule_waves", [])
+    if not isinstance(waves, list) or not waves:
+        return None, (
+            f"dispatch-receipt: schedule_waves is unusable ({_scalar(waves)}); "
+            "run schedule to persist a partition, or reset the pair"
+        )
+    # An absent container reads as the empty one: `init` and `schedule` both
+    # create it, so absence is cohort state written before receipts existed.
+    malformed = malformed_receipts_position(state.get(RECEIPTS_KEY, {}))
+    if malformed is not None:
+        return None, (
+            f"dispatch-receipt: {RECEIPTS_KEY} is malformed — expected {malformed} "
+            f"at the {'/'.join(RECEIPT_KEY_PATH)} key path; run reset to rebuild "
+            "cohort state"
+        )
+
+    current = non_negative_int(state, "current_wave_index", 0)
+    if isinstance(current, str):
+        return None, f"dispatch-receipt: {current}"
+    if current >= len(waves):
+        return None, (
+            f"dispatch-receipt: current_wave_index={current} is not an index into "
+            f"schedule_waves (len={len(waves)}); run reset to rebuild cohort state"
+        )
+    if index > current:
+        return None, (
+            f"dispatch-receipt: --wave-index {index} is above current_wave_index="
+            f"{current}; the run has not reached that wave"
+        )
+
+    wave = waves[index]
+    # The declared predicate, not a restatement of it. A review found this
+    # spelled out inline while `wave_is_well_formed` sat re-bound above and
+    # `cmd_wave_advance` already called it — two copies of one predicate, in the
+    # change whose whole subject is that duplicated predicates drift apart.
+    if not wave_is_well_formed(wave):
+        return None, (
+            f"dispatch-receipt: schedule_waves[{index}] is malformed "
+            f"({_scalar(wave)}); expected a non-empty list of task identifiers"
+        )
+    if task_id not in wave:
+        return None, (
+            f"dispatch-receipt: {_scalar(task_id)} is not in wave {index}, which "
+            f"holds {bounded_id_list(wave)}"
+        )
+
+    record = (
+        {"kind": RECEIPT_KIND}
+        if receipt
+        else {"kind": DECLINE_KIND, "reason": decline}
     )
+    updated = copy.deepcopy(state)
+    container = updated.get(RECEIPTS_KEY, {})
+    digest = partition_digest(waves)
+    # Keyed by the declared path. Writing the same triple twice replaces one
+    # record with an equal one, which is why the verb needs no idempotency key.
+    container.setdefault(digest, {}).setdefault(str(index), {})[task_id] = record
+    updated[RECEIPTS_KEY] = container
+    return updated, None
+
+
+@_locked("dispatch-receipt")
+def cmd_dispatch_receipt(args: argparse.Namespace) -> int:
+    try:
+        spec_dir = _resolve_spec_dir(args.spec_dir)
+    except ValueError as exc:
+        return stop(str(exc))
+    try:
+        state = read_state(spec_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        return stop(str(exc))
+    err = _validate_run_id(state, args.expect_run_id, verb="dispatch-receipt")
+    if err is not None:
+        return err
+
+    # argv decoding, not validation: every acceptance decision stays with
+    # `non_negative_int` inside `plan_dispatch_receipt`, which is what rejects a
+    # negative, a float, a bool and a non-numeric spelling alike. Decoding here
+    # rather than through argparse `type=int` is what lets a non-integer reach
+    # that one validation instead of dying in the parser with a usage message.
+    raw_index: object = args.wave_index
+    with contextlib.suppress(TypeError, ValueError):
+        raw_index = int(raw_index)
+
+    updated, reason = plan_dispatch_receipt(
+        state,
+        task_id=args.task,
+        wave_index=raw_index,
+        receipt=args.receipt,
+        decline=args.decline,
+    )
+    if reason is not None:
+        return stop(reason)
+    write_state_atomic(spec_dir, updated)
+    kind = RECEIPT_KIND if args.receipt else f"{DECLINE_KIND} ({args.decline})"
+    print(
+        f"loop-cohort: dispatch-receipt recorded {kind} for {args.task} "
+        f"in wave {raw_index} of {spec_dir.name}"
+    )
+    return 0
+
+
+# ── wave reopen ───────────────────────────────────────────────────────────
+#
+# The repair-round mutation: supersedes every record held under the LIVE
+# partition digest at `current_wave_index`, and removes none.
+# `wave-complete-dispatch-receipts` § Never do names the only three paths that
+# may remove a record, and this is not one of them, so a record here only ever
+# gains `SUPERSEDED_KEY: True` — it is never dropped, and neither is a
+# now-empty container or subtree: `unaccounted_wave_tasks` returns no tasks for
+# an absent container, so pruning one would disable the very accounting this
+# verb exists to re-arm.
+
+
+def plan_wave_reopen(state: dict) -> tuple[dict | None, str | None, int, int]:
+    """Validate a wave reopen and return the state to persist.
+
+    Returns ``(new_state, None, wave_index, marked_count)`` on acceptance or
+    ``(None, reason, 0, 0)`` on refusal, in refuse-cheapest-first order
+    matching `plan_dispatch_receipt`: usable partition, well-formed container,
+    valid pointer. Pure — the caller owns the lock and the write — so every
+    refusal leaves `state.json` byte-identical.
+
+    An absent or empty container reads as nothing to reopen, exactly as
+    `plan_dispatch_receipt` reads an absent container as the empty one: no key
+    is added, and the returned state is unchanged.
+    """
+    waves = state.get("schedule_waves", [])
+    if not isinstance(waves, list) or not waves:
+        return None, (
+            f"wave reopen: schedule_waves is unusable ({_scalar(waves)}); run "
+            "schedule to persist a partition, or reset to rebuild cohort state"
+        ), 0, 0
+    malformed = malformed_receipts_position(state.get(RECEIPTS_KEY, {}))
+    if malformed is not None:
+        return None, (
+            f"wave reopen: {RECEIPTS_KEY} is malformed — expected {malformed} "
+            f"at the {'/'.join(RECEIPT_KEY_PATH)} key path; run reset to "
+            "rebuild cohort state"
+        ), 0, 0
+    index = non_negative_int(state, "current_wave_index", 0)
+    if isinstance(index, str):
+        return None, f"wave reopen: {index}", 0, 0
+    if index >= len(waves):
+        return None, (
+            f"wave reopen: current_wave_index={index} is not an index into "
+            f"schedule_waves (len={len(waves)}); run reset to rebuild cohort "
+            "state"
+        ), 0, 0
+
+    # Every position in `container` already satisfies `is_dispatch_record`,
+    # established by the malformed check above over the WHOLE container —
+    # not only the live digest's current wave — so no further validation is
+    # needed before marking.
+    updated = copy.deepcopy(state)
+    container = updated.get(RECEIPTS_KEY, {})
+    digest = partition_digest(waves)
+    wave_records = container.get(digest, {}).get(str(index))
+    marked = 0
+    if isinstance(wave_records, dict):
+        for record in wave_records.values():
+            if record.get(SUPERSEDED_KEY) is not True:
+                record[SUPERSEDED_KEY] = True
+                marked += 1
+    return updated, None, index, marked
+
+
+@_locked("wave reopen")
+def cmd_wave_reopen(args: argparse.Namespace) -> int:
+    try:
+        spec_dir = _resolve_spec_dir(args.spec_dir)
+    except ValueError as exc:
+        return stop(str(exc))
+    try:
+        state = read_state(spec_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        return stop(str(exc))
+    err = _validate_run_id(state, args.expect_run_id, verb="wave reopen")
+    if err is not None:
+        return err
+
+    updated, reason, wave_index, marked = plan_wave_reopen(state)
+    if reason is not None:
+        return stop(reason)
+    write_state_atomic(spec_dir, updated)
+    print(
+        f"loop-cohort: wave reopen wave {wave_index}: "
+        f"{marked} record(s) superseded for {spec_dir.name}"
+    )
+    return 0
 
 
 # ── record-attempt ────────────────────────────────────────────────────────
@@ -1293,35 +3041,24 @@ def cmd_record_attempt(args: argparse.Namespace) -> int:
     if err is not None:
         return err
 
-    # The cycle-id must be <run_id>:<decimal-sequence>; the run_id prefix must match.
     cycle_id = args.cycle_id
-    _parts = cycle_id.split(":", 1)
-    if len(_parts) != 2 or not _parts[1].isdigit():
-        return stop(
-            f"record-attempt: --cycle-id must be '<run_id>:<decimal-sequence>' "
-            f"(got {cycle_id!r})"
+    try:
+        updated, status = _record_attempt_state(
+            state, expected_run_id=args.expect_run_id, cycle_id=cycle_id
         )
-    run_id_prefix = _parts[0]
-    if run_id_prefix != args.expect_run_id:
-        return stop(
-            f"record-attempt: run_id prefix in --cycle-id ({run_id_prefix!r}) "
-            f"does not match --expect-run-id ({args.expect_run_id!r})"
-        )
-
-    last_id = state.get("last_record_attempt_cycle_id")
-    if last_id == cycle_id:
+    except ValueError as exc:
+        return stop(str(exc))
+    if status == "already":
         print(
             f"loop-cohort: record-attempt already applied for cycle {cycle_id!r} "
             f"(idempotent no-op)"
         )
         return 0
 
-    state["implementation_retry_count"] = int(state.get("implementation_retry_count", 0)) + 1
-    state["last_record_attempt_cycle_id"] = cycle_id
-    write_state_atomic(spec_dir, state)
+    write_state_atomic(spec_dir, updated)
     print(
         f"loop-cohort: record-attempt implementation_retry_count="
-        f"{state['implementation_retry_count']} cycle={cycle_id!r} "
+        f"{updated['implementation_retry_count']} cycle={cycle_id!r} "
         f"for {spec_dir.name}"
     )
     return 0
@@ -1340,10 +3077,51 @@ FINDING_LINE_RE_UNQUOTED = re.compile(
 FINDING_LINE_RE_WHERE = re.compile(
     r"^(?P<title>\*\*\d+\.[^*]+\*\*)\s*[\.\s]*\s*Where:\s*(?P<location>[^.]+)"
 )
+ADJUDICATION_HEADINGS = (
+    "## Main-loop result",
+    "## Refuted audit",
+    "## Indeterminate audit",
+)
+NUMBERED_FINDING_MARKER_RE = re.compile(r"\*\*\d+\.")
+NOT_CHECKED_HEADING = "## Not checked"
+# Shape only, deliberately. Two earlier revisions tried to make footer bullets
+# safe to skip adjudication — first by rejecting finding-shaped markers, then by
+# requiring a `Did not ` opener. Both were defeated, because separating
+# disclosure prose from finding prose is undecidable by pattern
+# ("- Did not complete authorization review: unauthenticated requests can set
+# is_admin=true" satisfies both). The footer's content is therefore never
+# trusted: `not_checked_present` disqualifies a report from the clean fast path
+# and routes it to full adjudication, which reads the whole body. That makes a
+# content rule here non-load-bearing, and a guard that looks load-bearing but
+# is not is worse than none.
+NOT_CHECKED_BULLET_RE = re.compile(r"^- ")
+STRICT_SUSTAINED_FINDING_LINE_RE = re.compile(
+    r"^\*\*\d+\.[^*\n]+\*\*\s*"
+    r"(?:`[^`\n]+:\d+[^`\n]*`|\S+:\d+|Where:\s+[^.\n]+)\.\s+"
+    r"\S(?:.*\S)?\s+Fix:\s+\S.*$"
+)
 
 
-def parse_findings(report_text: str) -> list[str]:
-    """Return SHA-256 fingerprints for findings in a reviewer report.
+# Closed on purpose: the three-bucket scheme, the major/minor pair, and the
+# CRITICAL/HIGH/MEDIUM/LOW scheme the reviewer agents map onto on request.
+# Stripping any bracketed text would also strip a reviewer-assigned finding id.
+_STABLE_TITLE_SEVERITY_RE = re.compile(
+    r"^\[(?:blocker|concern|nit|major|minor|critical|high|medium|low)\]\s*",
+    re.IGNORECASE,
+)
+
+
+def stable_title(title: str) -> str:
+    """Return a finding title without its ordinal or severity tag."""
+    unwrapped = title.strip()
+    if unwrapped.startswith("**") and unwrapped.endswith("**"):
+        unwrapped = unwrapped[2:-2]
+    without_ordinal = re.sub(r"^\d+\.\s*", "", unwrapped)
+    return _STABLE_TITLE_SEVERITY_RE.sub("", without_ordinal)
+
+
+def parse_finding_identities(report_text: str) -> tuple[list[str], list[str]]:
+    """Return fingerprint and family digests for findings in a reviewer report.
 
     Algorithm pinned by the work-loop SKILL §REVIEW:
         sha256("<file>|<line>|<title>")
@@ -1357,6 +3135,19 @@ def parse_findings(report_text: str) -> list[str]:
     - experience-reviewer:  **title.** Where: loc. (location; key uses loc|0|title)
     """
     fingerprints: list[str] = []
+    families: list[str] = []
+
+    def add_finding(location: str, line_number: str, title: str) -> None:
+        """Append both identities for one parsed finding."""
+        fingerprint_preimage = f"{location}|{line_number}|{title}"
+        family_preimage = f"{location}|{stable_title(title)}"
+        fingerprints.append(
+            hashlib.sha256(fingerprint_preimage.encode("utf-8")).hexdigest()
+        )
+        families.append(
+            hashlib.sha256(family_preimage.encode("utf-8")).hexdigest()
+        )
+
     for raw in report_text.splitlines():
         line = raw.strip()
         if not line.startswith("**"):
@@ -1372,20 +3163,14 @@ def parse_findings(report_text: str) -> list[str]:
             line_match = re.match(r"\d+", rest)
             if not line_match:
                 continue
-            key = f"{file_part}|{line_match.group(0)}|{title}"
-            fingerprints.append(
-                hashlib.sha256(key.encode("utf-8")).hexdigest()
-            )
+            add_finding(file_part, line_match.group(0), title)
             continue
         # Try Where: <location> (experience-reviewer)
         m = FINDING_LINE_RE_WHERE.match(line)
         if m:
             title = m.group("title").strip()
             location = m.group("location").strip()
-            key = f"{location}|0|{title}"
-            fingerprints.append(
-                hashlib.sha256(key.encode("utf-8")).hexdigest()
-            )
+            add_finding(location, "0", title)
             continue
         # Try unquoted file:line (frontend-reviewer)
         m = FINDING_LINE_RE_UNQUOTED.match(line)
@@ -1396,11 +3181,110 @@ def parse_findings(report_text: str) -> list[str]:
             line_match = re.match(r"\d+", rest)
             if not line_match:
                 continue
-            key = f"{file_part}|{line_match.group(0)}|{title}"
-            fingerprints.append(
-                hashlib.sha256(key.encode("utf-8")).hexdigest()
-            )
-    return fingerprints
+            add_finding(file_part, line_match.group(0), title)
+    return fingerprints, families
+
+
+def parse_findings(report_text: str) -> list[str]:
+    """Return SHA-256 fingerprints while preserving the legacy parser API."""
+    return parse_finding_identities(report_text)[0]
+
+
+def _is_strict_actionable_result(actionable: str) -> bool:
+    """Accept exact clean or complete parser-compatible sustained lines."""
+    if actionable == CLEAN_SUBSTRING:
+        return True
+
+    finding_lines = [line for line in actionable.splitlines() if line.strip()]
+    return bool(finding_lines) and all(
+        STRICT_SUSTAINED_FINDING_LINE_RE.fullmatch(line.strip()) is not None
+        and len(NUMBERED_FINDING_MARKER_RE.findall(line)) == 1
+        and len(parse_findings(line)) == 1
+        for line in finding_lines
+    )
+
+
+def _invalid(reason: str) -> dict:
+    """Refuse a report, naming which rule refused it.
+
+    `invalid` returns at exit 0 and stops the loop, so an unnamed refusal costs
+    the operator a parser read to act on. The reason is enumerated and
+    content-free, matching `review-artifact.py`'s refusal codes.
+    """
+    print(
+        f"loop-cohort: report classified invalid ({reason})",
+        file=sys.stderr,
+    )
+    return {
+        "classification": "invalid",
+        "fingerprints": [],
+        "families": [],
+        "matches_previous_round": False,
+        "reason": reason,
+    }
+
+
+def _actionable_review_text(
+    report_text: str,
+    *,
+    require_adjudication: bool = False,
+) -> tuple[str, str | None]:
+    """Return the main-loop result and a refusal reason, or None when accepted.
+
+    Legacy reviewer reports have no adjudication headings and remain unchanged.
+    When any adjudication heading is present, require the exact three-section
+    envelope, keep only the main-loop result, and reject finding-shaped audit
+    text rather than allowing it to reach fingerprinting.
+
+    The second element is `None` when the structure is acceptable, otherwise an
+    enumerated, content-free code naming which rule refused it. Codes mirror
+    `review-artifact.py`'s `INVALID <code>` refusal vocabulary — the other half
+    of this gateway — so a fail-closed stop is diagnosable without reopening the
+    artifact or reverse-engineering the parser. They carry no report content,
+    no path, and no line text.
+    """
+    lines = report_text.splitlines()
+    found_headings = [
+        line.strip() for line in lines if line.strip().startswith("## ")
+    ]
+    if not any(heading in found_headings for heading in ADJUDICATION_HEADINGS):
+        return report_text, "legacy-report" if require_adjudication else None
+    if found_headings != list(ADJUDICATION_HEADINGS):
+        return "", "envelope-headings"
+
+    heading_indexes = [
+        next(index for index, line in enumerate(lines) if line.strip() == heading)
+        for heading in ADJUDICATION_HEADINGS
+    ]
+    if any(line.strip() for line in lines[: heading_indexes[0]]):
+        return "", "prose-before-envelope"
+
+    main_start, refuted_start, indeterminate_start = heading_indexes
+    audit_lines = lines[refuted_start + 1 :]
+    if any(NUMBERED_FINDING_MARKER_RE.search(line) for line in audit_lines):
+        return "", "audit-numbered-finding"
+
+    actionable = "\n".join(lines[main_start + 1 : refuted_start]).strip()
+    indeterminate_audit = "\n".join(lines[indeterminate_start + 1 :]).strip()
+
+    # The refusals below are NOT gated on `require_adjudication`. Reaching here
+    # already proves the exact three-section envelope is present, so the report
+    # is an adjudication whichever flag the caller passed — and an indeterminate
+    # verdict must never classify as clean (AC5), including on a flagless
+    # `review inspect` or a replayed `review record`. Envelope-free legacy
+    # reports returned earlier and are unaffected.
+    #
+    # Order matters for the operator, not for soundness — every `if` below
+    # refuses. Report the most specific cause first: an indeterminate verdict is
+    # a decision the adjudicator made and the owner must resolve, whereas a
+    # shape complaint about the same report would send them to the wrong place.
+    if INDETERMINATE_SENTINEL in report_text:
+        return "", "indeterminate-present"
+    if indeterminate_audit != "None.":
+        return "", "indeterminate-audit-not-none"
+    if not _is_strict_actionable_result(actionable):
+        return "", "sustained-line-shape"
+    return actionable, None
 
 
 def _resolved_report(candidate: str) -> Path:
@@ -1427,32 +3311,176 @@ def _resolved_report(candidate: str) -> Path:
         return Path(candidate)
 
 
-def _classify_report(report_path: Path, state: dict) -> dict:
+def _classify_raw_report(report_path: Path) -> dict[str, object]:
+    """Classify a raw reviewer return without widening adjudication semantics.
+
+    This remains separate from `_classify_report`: that function's optional
+    adjudication envelope is a high-stakes path, where a third mode could
+    silently weaken strict classification.
+    """
+    reason: str | None = None
+    try:
+        report_text = read_managed_text(report_path.resolve(), report_path.name)
+    except (OSError, UnicodeDecodeError, ValueError):
+        classification = "invalid"
+        finding_count = 0
+        classified_digest = None
+        reason = "unreadable"
+        lines: list[str] = []
+    else:
+        # Digest the bytes this call actually classified, not a second read.
+        # `read_managed_text` decodes bytes strictly without folding newlines, so
+        # re-encoding is byte-identical to the file. A caller that re-opened the
+        # path for its audit anchor could digest content nobody classified.
+        classified_digest = hashlib.sha256(report_text.encode("utf-8")).hexdigest()
+        # LF and CRLF only (AC2.3b). `str.splitlines()` also breaks on \v, \f,
+        # \x1c-\x1e, \x85, U+2028 and U+2029, so a single visual line could be
+        # split into a grammar that reads clean. Any of those left embedded here
+        # makes its line unequal to the sentinel, which fails closed.
+        lines = report_text.replace("\r\n", "\n").split("\n")
+        finding_count = len(parse_findings(report_text))
+        if finding_count:
+            classification = "findings"
+        else:
+            sentinel_count = sum(line == CLEAN_SUBSTRING for line in lines)
+            sentinel_index = next(
+                (index for index, line in enumerate(lines) if line == CLEAN_SUBSTRING),
+                -1,
+            )
+            footer_started = False
+            clean_shape = sentinel_count == 1
+            if not clean_shape:
+                reason = "sentinel-absent" if sentinel_count == 0 else "sentinel-repeated"
+            for index, line in enumerate(lines):
+                if not clean_shape:
+                    break
+                if not line or index == sentinel_index:
+                    continue
+                if index < sentinel_index:
+                    clean_shape = False
+                    reason = "content-before-sentinel"
+                    break
+                if line == NOT_CHECKED_HEADING:
+                    if footer_started:
+                        clean_shape = False
+                        reason = "footer-heading-repeated"
+                        break
+                    footer_started = True
+                    continue
+                if footer_started and NOT_CHECKED_BULLET_RE.match(line):
+                    continue
+                clean_shape = False
+                reason = (
+                    "footer-bullet-malformed" if footer_started else "unpermitted-content"
+                )
+                break
+            classification = "clean" if clean_shape else "invalid"
+
+    # Disclosure metadata is deliberately computed after classification.
+    not_checked_present = NOT_CHECKED_HEADING in lines
+    return {
+        "classification": classification,
+        "finding_count": finding_count,
+        "not_checked_present": not_checked_present,
+        # Internal only — never emitted in the JSON payload.
+        # `_raw_classification_payload` projects the closed public field set so a
+        # key added here cannot leak into the documented contract. The reason is
+        # a fixed, content-free code surfaced on stderr, mirroring
+        # `_actionable_review_text`'s refusal vocabulary: a bare `invalid` leaves
+        # an operator unable to tell a missing sentinel from a malformed footer.
+        "_classified_digest": classified_digest,
+        "_reason": reason,
+    }
+
+
+RAW_REFUSAL_REASONS = frozenset(
+    {
+        "unreadable",
+        "sentinel-absent",
+        "sentinel-repeated",
+        "content-before-sentinel",
+        "footer-heading-repeated",
+        "footer-bullet-malformed",
+        "unpermitted-content",
+    }
+)
+
+
+def _warn_raw_refusal(result: dict[str, object]) -> None:
+    """Name which grammar rule refused the report, without echoing its content."""
+    reason = result.get("_reason")
+    if result["classification"] == "invalid" and reason:
+        print(f"loop-cohort: raw report refused ({reason})", file=sys.stderr)
+
+
+RAW_CLASSIFICATION_FIELDS = ("classification", "finding_count", "not_checked_present")
+
+
+def _raw_classification_payload(result: dict[str, object]) -> dict[str, object]:
+    """Project the closed emitted field set for the raw-classify contract."""
+    return {field: result[field] for field in RAW_CLASSIFICATION_FIELDS}
+
+
+def _classify_report(
+    report_path: Path,
+    state: dict,
+    *,
+    require_adjudication: bool = False,
+) -> dict:
     """Classify a reviewer report. Exits 0 for all report-content outcomes.
 
-    Returns a dict with keys: classification, fingerprints, matches_previous_round.
+    Every return carries classification, fingerprints, families, and
+    matches_previous_round; an ``invalid`` return also carries reason.
     """
+    # Bounded read, reached from `cmd_review_record`, which holds the state lock — so a
+    # reviewer report that is a FIFO or an arbitrarily large file would otherwise block
+    # or read without limit inside the critical section.
+    #
+    # The path is RESOLVED first, deliberately. Unlike `spec.md` / `plan.md` this is a
+    # user-supplied `--report` argument, not managed state: it carries no confinement
+    # claim, and a symlinked report worked before this change. Reading the unresolved
+    # path would make `O_NOFOLLOW` refuse it, narrowing a shipped CLI's accepted inputs
+    # for no security benefit — the author chose the path. Resolving keeps the size and
+    # FIFO bounds, which are the parts that matter under the lock.
     try:
-        report_text = report_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return {
-            "classification": "invalid",
-            "fingerprints": [],
-            "matches_previous_round": False,
-        }
+        report_text = read_managed_text(report_path.resolve(), report_path.name)
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        # The reason is REPORTED, not discarded. This returns `invalid` at exit 0, so
+        # without a diagnostic an unreadable report is indistinguishable from one that
+        # genuinely contains no findings — and that classification feeds the review
+        # retry accounting.
+        print(
+            f"loop-cohort: warning — {_diag(report_path.name)} could not be read "
+            f"({_diag(exc)}); classified invalid",
+            file=sys.stderr,
+        )
+        return _invalid("unreadable")
 
-    fps = parse_findings(report_text)
-    has_clean = (
-        CLEAN_SUBSTRING in report_text
-        or _SHIP_IT_RE.search(report_text) is not None
+    actionable_text, refusal = _actionable_review_text(
+        report_text,
+        require_adjudication=require_adjudication,
     )
+    if refusal is not None:
+        return _invalid(refusal)
+
+    fps, families = parse_finding_identities(actionable_text)
+    if require_adjudication:
+        has_clean = actionable_text == CLEAN_SUBSTRING
+    else:
+        has_clean = (
+            CLEAN_SUBSTRING in actionable_text
+            or _SHIP_IT_RE.search(actionable_text) is not None
+        )
 
     if fps:
         classification = "findings"
     elif has_clean:
         classification = "clean"
     else:
-        classification = "invalid"
+        # No fingerprints and no clean sentinel. Reachable on the flagless
+        # legacy path; name it like every other refusal so a consumer reading
+        # `reason` never sees a missing key.
+        return _invalid("no-actionable-result")
 
     canonical_fps = sorted(set(fps))
     previous = sorted(set(state.get("finding_fingerprints", [])))
@@ -1463,8 +3491,50 @@ def _classify_report(report_path: Path, state: dict) -> dict:
     return {
         "classification": classification,
         "fingerprints": canonical_fps,
+        "families": sorted(set(families)),
         "matches_previous_round": matches_prev,
     }
+
+
+def _print_review_result(result: dict, *, as_json: bool, verb: str) -> None:
+    """Print one review classification without report content or path data."""
+    if as_json:
+        print(json.dumps(result))
+        return
+    print(
+        f"loop-cohort: review {verb} classification={result['classification']} "
+        f"fingerprints={len(result['fingerprints'])} "
+        f"matches_previous_round={result['matches_previous_round']}"
+    )
+
+
+def cmd_review_classify(args: argparse.Namespace) -> int:
+    """Strictly classify an adjudication report without cohort state."""
+    report_path = _resolved_report(args.report)
+    result = _classify_report(
+        report_path,
+        {},
+        require_adjudication=True,
+    )
+    _print_review_result(result, as_json=args.json, verb="classify")
+    return 0
+
+
+def cmd_review_raw_classify(args: argparse.Namespace) -> int:
+    """Classify a raw reviewer report without cohort state."""
+    full = _classify_raw_report(_resolved_report(args.report))
+    _warn_raw_refusal(full)
+    result = _raw_classification_payload(full)
+    if args.json:
+        print(json.dumps(result))
+    else:
+        print(
+            "loop-cohort: review raw-classify "
+            f"classification={result['classification']} "
+            f"finding_count={result['finding_count']} "
+            f"not_checked_present={result['not_checked_present']}"
+        )
+    return 0
 
 
 def cmd_review_inspect(args: argparse.Namespace) -> int:
@@ -1479,18 +3549,148 @@ def cmd_review_inspect(args: argparse.Namespace) -> int:
         return stop(str(exc))
 
     report_path = _resolved_report(args.report)
-    result = _classify_report(report_path, state)
+    result = _classify_report(
+        report_path,
+        state,
+        require_adjudication=args.adjudication,
+    )
 
-    if args.json:
-        print(json.dumps(result))
-    else:
-        print(
-            f"loop-cohort: review inspect "
-            f"classification={result['classification']} "
-            f"fingerprints={len(result['fingerprints'])} "
-            f"matches_previous_round={result['matches_previous_round']}"
-        )
+    _print_review_result(result, as_json=args.json, verb="inspect")
     return 0  # content outcomes always exit 0
+
+
+# ── review-record idempotency ─────────────────────────────────────────────
+#
+# `--operation-id` names the round being recorded, so a session that re-issues a
+# recording after losing its own record of whether the write landed gets one
+# write rather than two. The id is `<run_id>:<transition_sequence>` supplied by
+# the caller and validated here; this module never reads `engine-state.json`.
+#
+# The payload digest is STORED, not derived on read. Deriving it is unsound: the
+# fingerprint and all-skipped branches overwrite `finding_fingerprints` and never
+# touch `last_review_clean_source`, the clean branches do the reverse, and no
+# field records which form closed a round — so `state.json` stops describing a
+# round's payload as soon as the next round lands.
+
+# `\A`/`\Z`, not `^`/`$`: Python's `$` also matches before a trailing newline,
+# so `"<run>:1\n"` would pass and then compare unequal to `"<run>:1"` -- two
+# spellings of one round, each recording separately. `[0-9]` rather than `\d`
+# for the same reason: `\d` accepts Unicode decimal digits.
+_REVIEW_OP_ID_RE = re.compile(r"\A(?P<run>[^:\n]+):(?P<seq>[0-9]{1,18})\Z")
+_REVIEW_OP_ID_MAX = 200
+
+
+def _review_payload_digest(form: str, payload: str) -> str:
+    r"""`sha256(form + "\n" + payload)`. The form prefix stops two forms colliding."""
+    return hashlib.sha256(f"{form}\n{payload}".encode()).hexdigest()
+
+
+def _review_operation_decision(
+    state: dict,
+    operation_id: str | None,
+    payload_digest: str | None,
+    *,
+    expect_run_id: str,
+    spec_name: str,
+    allow_durable_operation_id: bool = False,
+) -> tuple[str, str | None]:
+    """Decide the recorded round's fate before any mutation.
+
+    Returns `(outcome, reason)`. `outcome` is one of:
+
+    - `"unflagged"` — no id supplied; behave exactly as before and leave the two
+      recorded fields alone. They name the last round recorded *under an id*,
+      which a flagless round does not become.
+    - `"already"`   — this id and this payload are already recorded; no mutation.
+    - `"record"`    — proceed with the mutation and set both fields.
+    - `"refuse"`    — caller must surface the accompanying reason.
+    """
+    if operation_id is None:
+        return "unflagged", None
+
+    if len(operation_id) > _REVIEW_OP_ID_MAX:
+        # Its own message. Folding this into the format refusal below would tell
+        # an operator the format was wrong when the format may be perfectly
+        # correct and only the length is not.
+        return "refuse", (
+            f"review record: --operation-id is {len(operation_id)} characters, "
+            f"over the {_REVIEW_OP_ID_MAX}-character limit, for {spec_name}"
+        )
+
+    if allow_durable_operation_id:
+        if not _SHA256_RE.fullmatch(operation_id):
+            return "refuse", (
+                "review record: internal transition operation id must be a "
+                f"SHA-256 transition id (got {operation_id!r}) for {spec_name}"
+            )
+        matched = None
+    else:
+        matched = _REVIEW_OP_ID_RE.match(operation_id)
+
+    # A leading zero is a second spelling of the same sequence, and the recorded
+    # id is compared by exact string equality, so `:01` and `:1` would each
+    # record the round once.
+    if not allow_durable_operation_id:
+        canonical = matched is not None and (
+            matched.group("seq") == "0" or not matched.group("seq").startswith("0")
+        )
+        if not canonical:
+            return "refuse", (
+                f"review record: --operation-id must be "
+                f"'<expect-run-id>:<decimal-sequence>' with no leading zero "
+                f"(got {operation_id!r}) for {spec_name}"
+            )
+        if matched.group("run") != expect_run_id:
+            return "refuse", (
+                f"review record: --operation-id names run {matched.group('run')!r} "
+                f"but --expect-run-id is {expect_run_id!r} for {spec_name}"
+            )
+    if payload_digest is None:
+        # Refusing here is what keeps a later repeat decidable: an id recorded
+        # without a comparison value could never be judged a replay.
+        return "refuse", (
+            "review record: this round's payload digest could not be computed, "
+            "so recording it under an operation id would leave a later repeat "
+            f"undecidable; re-run once the payload is readable, for {spec_name}"
+        )
+
+    recorded_id = state.get("last_review_record_operation_id")
+    if recorded_id == operation_id:
+        if state.get("last_review_record_payload_digest") == payload_digest:
+            return "already", (
+                f"review record already recorded for operation "
+                f"{operation_id!r} (idempotent no-op) for {spec_name}"
+            )
+        return "refuse", (
+            f"review record: operation {operation_id!r} is already recorded with "
+            f"a different payload; a replay must carry the payload it recorded. "
+            f"Compare against last_review_record_payload_digest in "
+            f"`loop-cohort status --json` for {spec_name}"
+        )
+    return "record", None
+
+
+def _review_operation_gate(
+    state: dict,
+    operation_id: str | None,
+    payload_digest: str | None,
+    *,
+    expect_run_id: str,
+    spec_name: str,
+) -> tuple[str, int | None]:
+    outcome, reason = _review_operation_decision(
+        state,
+        operation_id,
+        payload_digest,
+        expect_run_id=expect_run_id,
+        spec_name=spec_name,
+    )
+    if outcome == "refuse":
+        return outcome, stop(str(reason))
+    if outcome == "already":
+        _emit(reason)
+        return outcome, 0
+    return outcome, None
 
 
 @_locked("review record")
@@ -1507,15 +3707,32 @@ def cmd_review_record(args: argparse.Namespace) -> int:
     if err is not None:
         return err
 
+    operation_id = getattr(args, "operation_id", None)
+
     if getattr(args, "all_skipped", False):
         # All-skipped branch: every warranted reviewer was a named skip
-        state["previous_finding_fingerprints"] = list(state.get("finding_fingerprints", []))
-        state["finding_fingerprints"] = []
-        state["review_round_count"] = int(state.get("review_round_count", 0)) + 1
-        write_state_atomic(spec_dir, state)
+        digest = _review_payload_digest("all-skipped", "")
+        try:
+            updated, status = _record_review_state(
+                state,
+                expected_run_id=args.expect_run_id,
+                spec_name=spec_dir.name,
+                form="all-skipped",
+                operation_id=operation_id,
+                payload_digest=digest,
+            )
+        except ValueError as exc:
+            return stop(str(exc))
+        if status == "already":
+            _emit(
+                f"review record already recorded for operation "
+                f"{operation_id!r} (idempotent no-op) for {spec_dir.name}"
+            )
+            return 0
+        write_state_atomic(spec_dir, updated)
         print(
             f"loop-cohort: review record (all-skipped) "
-            f"round={state['review_round_count']} for {spec_dir.name}"
+            f"round={updated['review_round_count']} for {spec_dir.name}"
         )
         return 0
 
@@ -1529,39 +3746,155 @@ def cmd_review_record(args: argparse.Namespace) -> int:
                 f"(40-char SHA-1 still accepted for a run that predates core 2.3.0); "
                 f"invalid: {bad!r}"
             )
-        state["previous_finding_fingerprints"] = list(state.get("finding_fingerprints", []))
-        state["finding_fingerprints"] = fingerprints
-        state["review_retry_count"] = int(state.get("review_retry_count", 0)) + 1
-        state["review_round_count"] = int(state.get("review_round_count", 0)) + 1
-        write_state_atomic(spec_dir, state)
+        digest = _review_payload_digest("fingerprint", "\n".join(fingerprints))
+        try:
+            updated, status = _record_review_state(
+                state,
+                expected_run_id=args.expect_run_id,
+                spec_name=spec_dir.name,
+                form="findings",
+                operation_id=operation_id,
+                payload_digest=digest,
+                fingerprints=fingerprints,
+                allow_retry_cap_override=getattr(
+                    args, "allow_retry_cap_override", False
+                ),
+            )
+        except ValueError as exc:
+            return stop(str(exc))
+        if status == "already":
+            _emit(
+                f"review record already recorded for operation "
+                f"{operation_id!r} (idempotent no-op) for {spec_dir.name}"
+            )
+            return 0
+        write_state_atomic(spec_dir, updated)
         print(
             f"loop-cohort: review record (findings) "
-            f"round={state['review_round_count']} retry={state['review_retry_count']} "
+            f"round={updated['review_round_count']} retry={updated['review_retry_count']} "
             f"fingerprints={len(fingerprints)} for {spec_dir.name}"
         )
         return 0
 
-    # Clean branch: --report <path>
-    if not args.report:
-        return stop("review record: one of --report or --fingerprint is required")
-    report_path = _resolved_report(args.report)
-    result = _classify_report(report_path, state)
-    if result["classification"] != "clean":
-        cls = result["classification"]
-        return stop(
-            f"review record --report: report classified as {cls!r}; "
-            "use --fingerprint for a findings round"
+    # Clean branches: a persisted byte-equal or structural raw return, or a
+    # validated adjudication report. Each rests on bytes read back from disk, so a
+    # recorded clean round is never the caller's own assertion about what a
+    # reviewer said.
+    direct_clean_file = getattr(args, "direct_clean_file", None)
+    if direct_clean_file is not None:
+        if args.adjudication:
+            return stop(
+                "review record: --direct-clean-file and --adjudication name two "
+                "different recording forms; use --report <path> --adjudication "
+                "for an adjudicated clean"
+            )
+        artifact_path = _resolved_report(direct_clean_file)
+        try:
+            raw = artifact_path.read_bytes()
+        except OSError:
+            return stop(
+                "review record: --direct-clean-file is unreadable; persist the "
+                "reviewer's complete return before recording"
+            )
+        # Byte comparison, not a decode-then-compare: an encoding that merely
+        # round-trips to the sentinel is not the sentinel.
+        if raw != CLEAN_SUBSTRING.encode("utf-8"):
+            return stop(
+                "review record: --direct-clean-file requires the exact clean sentinel"
+            )
+        clean_source = "direct-clean"
+        clean_digest = hashlib.sha256(raw).hexdigest()
+    elif structural_clean_file := getattr(args, "structural_clean_file", None):
+        if args.adjudication:
+            return stop(
+                "review record: --structural-clean-file and --adjudication name two "
+                "different recording forms"
+            )
+        artifact_path = _resolved_report(structural_clean_file)
+        result = _classify_raw_report(artifact_path)
+        if result["classification"] != "clean":
+            _warn_raw_refusal(result)
+            return stop(
+                "review record: --structural-clean-file requires a clean raw-report classification"
+            )
+        # A disclosure footer is prose, and prose is what the adjudicator exists
+        # to read. Its content is never trusted here, so a footer-bearing report
+        # is never fast-pathed however well-formed it looks. This reads
+        # `not_checked_present` for ROUTING only; classification above is
+        # decided without it (AC2.4).
+        if result["not_checked_present"]:
+            return stop(
+                "review record: a report carrying a '## Not checked' footer is not "
+                "eligible for the clean fast path; route it through "
+                "finding-adjudicator and record with --report … --adjudication"
+            )
+        clean_source = "structural-clean"
+        # The digest comes from the same read that classified the artifact. A
+        # second open here would let a concurrent write make the recorded audit
+        # anchor attest to content that was never classified clean.
+        clean_digest = result["_classified_digest"]
+        if not isinstance(clean_digest, str):
+            return stop(
+                "review record: --structural-clean-file produced no digest for "
+                "the classified bytes; re-persist the reviewer's return"
+            )
+    else:
+        if not args.report:
+            return stop(
+                "review record: one of --direct-clean-file, --structural-clean-file, --report, or "
+                "--fingerprint is required"
+            )
+        if not args.adjudication:
+            return stop(
+                "review record: --report requires --adjudication; use "
+                "--direct-clean-file for a persisted exact raw clean return"
+            )
+        report_path = _resolved_report(args.report)
+        result = _classify_report(
+            report_path,
+            state,
+            require_adjudication=True,
         )
+        if result["classification"] != "clean":
+            cls = result["classification"]
+            return stop(
+                f"review record --report: report classified as {cls!r}; "
+                "use --fingerprint for a findings round"
+            )
+        clean_source = "report"
+        try:
+            clean_digest = hashlib.sha256(report_path.read_bytes()).hexdigest()
+        except OSError:
+            # _classify_report already read it; a race here loses provenance
+            # but must not undo a classification that succeeded.
+            clean_digest = None
 
-    state["previous_finding_fingerprints"] = list(state.get("finding_fingerprints", []))
-    state["finding_fingerprints"] = []
-    state["review_round_count"] = int(state.get("review_round_count", 0)) + 1
-    # review_retry_count unchanged on clean review
-    write_state_atomic(spec_dir, state)
+    digest = (None if clean_digest is None
+              else _review_payload_digest(clean_source, clean_digest))
+    try:
+        updated, status = _record_review_state(
+            state,
+            expected_run_id=args.expect_run_id,
+            spec_name=spec_dir.name,
+            form="clean",
+            operation_id=operation_id,
+            payload_digest=digest,
+            clean_source=clean_source,
+            clean_digest=clean_digest,
+        )
+    except ValueError as exc:
+        return stop(str(exc))
+    if status == "already":
+        _emit(
+            f"review record already recorded for operation "
+            f"{operation_id!r} (idempotent no-op) for {spec_dir.name}"
+        )
+        return 0
+    write_state_atomic(spec_dir, updated)
     print(
-        f"loop-cohort: review record (clean) "
-        f"round={state['review_round_count']} "
-        f"retry={state['review_retry_count']} for {spec_dir.name}"
+        f"loop-cohort: review record (clean:{clean_source}) "
+        f"round={updated['review_round_count']} "
+        f"retry={updated['review_retry_count']} for {spec_dir.name}"
     )
     return 0
 
@@ -1618,7 +3951,7 @@ def build_parser() -> argparse.ArgumentParser:
     # identity
     sp = sub.add_parser(
         "identity",
-        help="read-only: verify schema_version=1 and optionally run_id match",
+        help=f"read-only: verify schema_version={SCHEMA_VERSION} and optionally run_id match",
     )
     sp.add_argument("spec_dir")
     sp.add_argument("--expect-run-id", dest="expect_run_id", default=None)
@@ -1687,9 +4020,32 @@ def build_parser() -> argparse.ArgumentParser:
     sp_sched.add_argument("--expect-run-id", dest="expect_run_id", default=None)
     sp_sched.add_argument(
         "--plan", default=None,
-        help="path to plan.md (default: <spec-dir>/plan.md)",
+        help="path to plan.md (must be <spec-dir>/plan.md)",
     )
     sp_sched.set_defaults(func=cmd_schedule)
+
+    # wave-decision
+    sp = sub.add_parser(
+        "wave-decision",
+        help="read-only: pre-dispatch task admission screen for one scheduled wave",
+    )
+    sp.add_argument("spec_dir")
+    sp.add_argument(
+        "--wave",
+        type=int,
+        default=None,
+        help="schedule_waves index; defaults to current_wave_index",
+    )
+    sp.add_argument(
+        "--force-sequential",
+        nargs="?",
+        const="__all__",
+        default=None,
+        metavar="<task-id>",
+        help="screen every task, or one named task, as sequential for this verdict",
+    )
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_wave_decision)
 
     # record-attempt
     sp = sub.add_parser(
@@ -1701,6 +4057,31 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--cycle-id", required=True, dest="cycle_id")
     sp.add_argument("--expect-run-id", required=True, dest="expect_run_id")
     sp.set_defaults(func=cmd_record_attempt)
+
+    # dispatch-receipt
+    sp = sub.add_parser(
+        "dispatch-receipt",
+        help="record who the controller says implemented one plan task",
+    )
+    sp.add_argument("spec_dir")
+    sp.add_argument("--task", required=True, help="plan task identifier, e.g. T3")
+    # A string, not `type=int`: the index is validated once, by the guard layer's
+    # non-negative-integer helper, so a non-integer must reach that validation
+    # instead of dying in the parser under a different message shape.
+    sp.add_argument(
+        "--wave-index", required=True, dest="wave_index",
+        help="wave index the task belongs to; at or below current_wave_index",
+    )
+    sp.add_argument(
+        "--receipt", action="store_true",
+        help="an implementer subagent implemented this task",
+    )
+    sp.add_argument(
+        "--decline", default=None, metavar="<reason>",
+        help=f"no subagent implemented it; reason from {list(DECLINE_REASONS)}",
+    )
+    sp.add_argument("--expect-run-id", required=True, dest="expect_run_id")
+    sp.set_defaults(func=cmd_dispatch_receipt)
 
     # wave (namespace with sub-verbs)
     sp_wave = sub.add_parser("wave", help="wave-advance and guard verbs")
@@ -1724,9 +4105,33 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--expect-run-id", required=True, dest="expect_run_id")
     sp.set_defaults(func=cmd_wave_advance)
 
+    sp = wave_sub.add_parser(
+        "reopen",
+        help="supersede the current wave's dispatch records for a repair round",
+    )
+    sp.add_argument("spec_dir")
+    sp.add_argument("--expect-run-id", required=True, dest="expect_run_id")
+    sp.set_defaults(func=cmd_wave_reopen)
+
     # review (namespace with sub-verbs)
     sp_review = sub.add_parser("review", help="review-phase state mutations")
     review_sub = sp_review.add_subparsers(dest="review_verb", required=True)
+
+    sp = review_sub.add_parser(
+        "classify",
+        help="state-free: strictly classify a finding-adjudicator report",
+    )
+    sp.add_argument("--report", required=True)
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_review_classify)
+
+    sp = review_sub.add_parser(
+        "raw-classify",
+        help="state-free: classify a raw reviewer report with the closed footer grammar",
+    )
+    sp.add_argument("--report", required=True)
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_review_raw_classify)
 
     sp = review_sub.add_parser(
         "inspect",
@@ -1734,6 +4139,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("spec_dir")
     sp.add_argument("--report", required=True)
+    sp.add_argument(
+        "--adjudication",
+        action="store_true",
+        help="require the exact finding-adjudicator report envelope",
+    )
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_review_inspect)
 
@@ -1743,8 +4153,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("spec_dir")
     _rr_grp = sp.add_mutually_exclusive_group(required=True)
-    _rr_grp.add_argument("--report", default=None,
-                         help="path to a clean reviewer report")
+    _rr_grp.add_argument(
+        "--direct-clean-file",
+        default=None,
+        help=(
+            "path to the persisted complete reviewer return; its bytes must "
+            "equal the exact clean sentinel"
+        ),
+    )
+    _rr_grp.add_argument(
+        "--structural-clean-file",
+        default=None,
+        help="path to a raw reviewer return accepted by review raw-classify",
+    )
+    _rr_grp.add_argument(
+        "--report",
+        default=None,
+        help="path to a clean adjudication report; requires --adjudication",
+    )
     _rr_grp.add_argument(
         "--fingerprint",
         action="append",
@@ -1757,6 +4183,30 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         dest="all_skipped",
         help="all warranted reviewers were named skips; bumps round count, clears fingerprints",
+    )
+    sp.add_argument(
+        "--adjudication",
+        action="store_true",
+        help="require the exact finding-adjudicator envelope for --report",
+    )
+    sp.add_argument(
+        "--allow-retry-cap-override",
+        action="store_true",
+        dest="allow_retry_cap_override",
+        help=(
+            "record a findings round even though review_retry_count has reached "
+            "max_review_retries; for a human who has looked, not for an "
+            "unattended loop"
+        ),
+    )
+    sp.add_argument(
+        "--operation-id",
+        default=None,
+        dest="operation_id",
+        help=(
+            "'<run_id>:<transition_sequence>' naming this round; a repeat under "
+            "the same id and payload is a completed write, not a new round"
+        ),
     )
     sp.add_argument("--expect-run-id", required=True, dest="expect_run_id")
     sp.set_defaults(func=cmd_review_record)
@@ -1810,10 +4260,19 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # One chokepoint, not ~20 verb entries. Every verb reaches its body through this
+    # line, so a missed sentinel check is impossible here in a way it is not when the
+    # check is copied into each verb — and a verb that slipped through would run on
+    # stub callables that raise, which is loud but later than it needs to be.
+    if _g is None:
+        return stop(_guards_error or "_loop_guards.py is unavailable")
     try:
         return args.func(args)
     except KeyboardInterrupt:
         return stop("interrupted")
+
+
+_MODULE_COMPLETE = True
 
 
 if __name__ == "__main__":

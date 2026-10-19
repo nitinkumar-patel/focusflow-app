@@ -1,9 +1,11 @@
 # agentic-skills — skill-file authoring, distribution, metadata, isolation
 
-> **Loaded when:** the change authors, modifies, or packages a skill file (SKILL.md or
-> equivalent behaviour-definition file); parses or validates skill metadata (frontmatter,
-> plugin.json, pack.toml); builds or installs from a skill registry or distribution
-> package; or adds skill-execution sandbox configuration.
+> **Loaded when:** a skill-file change alters authority, untrusted-input
+> handling, tools, permissions, sandboxing, metadata parsing, security-metadata
+> declarations (`metadata.boundaries`, `metadata.credentialed`), distribution
+> security, or data handling; or the change builds or installs from a skill
+> registry or distribution package. Ordinary prompt wording with none of those
+> effects does not load this module.
 > **Standards:** OWASP Agentic Skills Top 10 v1.0 — **AST01** Malicious Skills, **AST03**
 > Over-Privileged Skills, **AST04** Insecure Metadata, **AST05** Untrusted External
 > Instructions, **AST06** Weak Isolation, **AST07** Update Drift, **AST09** No Governance,
@@ -122,7 +124,7 @@ how the receiving platform is expected to re-validate them before the skill exec
 For this boundary, the sanctioned helpers are typically the **skill build pipeline** (the
 `build-self` / `agentbundle build` path that validates the pack before projection) and the
 **distribution integrity check** (hash verification at install time). Resolve in precedence:
-`AGENTS.md` "blessed security tools/helpers" → `CONVENTIONS.md` → inference fallback (grep
+`AGENTS.md` "blessed security tools/helpers" → `AGENTS.md` → inference fallback (grep
 the codebase for the de-facto metadata validator and the install-audit mechanism). Flag a
 change that: (a) parses skill frontmatter with an unsafe deserializer instead of the
 sanctioned load path; (b) installs skills by copying files directly, bypassing the build

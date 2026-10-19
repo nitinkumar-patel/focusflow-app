@@ -4,37 +4,93 @@
 - **Owner:** <github-handle>
 - **Plan:** [`plan.md`](plan.md)
 - **Constrained by:** <!-- ADR-NNNN, RFC-NNNN, or "none" -->
-- **Brief:** <!-- optional: the product brief this spec was derived from (`docs/product/briefs/<slug>.md`); stamped by receive-brief. Omit, or "none", for a spec authored directly. Distinct from Constrained by: this is product provenance, not a governance constraint. -->
+- **Brief:** <!-- optional: the delivery brief this spec was derived from, named `brief:<slug>` (canonical) or `docs/product/briefs/<slug>.md` (accepted fallback); stamped by author-delivery-brief continue. Omit, or "none", for a spec authored directly. Distinct from Constrained by: this is product provenance, not a governance constraint. -->
 - **Discovery:** <!-- optional: the upstream discovery artifact this spec descended from (a decision brief / intent produced by an upstream discovery process), named by its stable id; the discovery-side sibling of Brief: (the spec→discovery up-edge a traceability check walks). Omit, or "none", for a spec authored without an upstream discovery. -->
-- **Contract:** <!-- contracts/<type>/<name> this spec defines or touches (see new-spec step 4b / CONVENTIONS § 4 Contracts), or "none" for a non-API feature. A contract surface is not just a synchronous REST API — an event interface or a backend-for-frontend (BFF) boundary is a contract too; name it here and author it under contracts/<type>/. -->
+- **Contract:** <!-- contracts/<type>/<name> this spec defines or touches (see new-spec step 4b / `references/spec-and-plan-contract.md` § Contracts), or "none" for a non-API feature. A contract surface is not just a synchronous REST API — an event interface or a backend-for-frontend (BFF) boundary is a contract too; name it here and author it under contracts/<type>/. -->
 - **Shape:** <!-- optional: ui | service | data | integration | mixed — selects which `## Design (LLD)` sub-sections scaffold in plan.md (e.g. ui pulls in component decomposition + state & control flow; service pulls in interfaces & contracts + data & schema + resilience — the plan template carries the authoritative map). Omit, or "mixed", when the feature spans several or you're unsure; the plan then scaffolds the full set and you prune. Stack-neutral: it names the *kind* of work, never a framework. -->
+<!-- If this spec intentionally has no criteria, remove the section below and add `- **Acceptance Criteria:** none — <one-line reason>` to the metadata header. -->
 
 > **Spec contract:** this document defines what "done" means. The implementing
 > PR must match this spec, or update it. Verification must be derivable from it.
+>
+> **Not every section is contract.** `Agent Rules`, `Testing Strategy` and
+> `Acceptance Criteria` are what a completion gate reads, and an amendment
+> changes them. `Outcome`, `What Changes`, `Durable Outputs`, `Follow-ons` and
+> `Assumptions` are working material: they orient a reader and an author corrects them in place
+> as the work teaches, without an amendment and without a review round. A review
+> finding against working material is advisory — it cannot block, because nothing
+> gates the text it cites. Marking the tiers is the spec's job; honouring them
+> when a finding is adjudicated is the reviewing surface's.
 
-<!-- **Light-mode lean fill.** For low-risk work running the `work-loop`
-skill's light mode, only Objective + Acceptance Criteria + a short task list
-(in `plan.md`) are required. **Boundaries**, **Testing Strategy**, and
-**Assumptions** are optional — keep them only if they earn their place. Any
-risk trigger (see the `work-loop` skill) escalates to full mode, where every
-section is filled. -->
+<!-- **Durable-spec fill.** This template governs work that needs a durable
+behavior contract for one delivery slice. Fill Outcome, What Changes, Agent
+Rules, Testing Strategy, and Acceptance Criteria to the depth the durable work
+requires, and Assumptions only where something is unresolved. The sibling plan carries the implementation and verification strategy.
+Eligible direct-light work does not create this artifact. -->
 
 <!-- **Present tense, as-built.** Write every body section below as if the
 feature already exists and always worked this way — no "will be", no
 "previously X, now Y", no deprecation timelines, no version-stamped history.
 The body describes the current contract; decision history lives in ADRs and the
-changelog. This applies to the spec body only — `plan.md` keeps its own
-changelog of how the approach evolved. -->
+release changelog. `plan.md` holds to the same rule: its `## Changelog` records
+approvals, not how the approach evolved. -->
 
-## Objective
+## Outcome
 
 <!--
-One paragraph. What are we building, who is the user, and what does success
-look like for them? Frame from the user's perspective, not the implementer's.
-Implementation detail belongs in `plan.md`.
+Two sentences, no more. The first names who this is for and what they get; the
+second says what success looks like for them. Frame from their perspective,
+not the implementer's, and leave implementation detail to `plan.md`. The cap is
+the point: an outcome that needs a third sentence is usually carrying a delta,
+which belongs in the section below, or a mechanism, which belongs in the plan.
 -->
 
-## Boundaries
+## What Changes
+
+<!--
+The delta, as bullets, for a human landing on this spec cold. It sits here —
+above every contract section — because a reader's first question is what moves,
+and a paragraph of Outcome does not answer it scannably.
+
+One bullet per change, each naming the thing that moves and where it lives. No
+rationale, no mechanism, no restating the Outcome in list form: a reader who
+stops after this section should know the shape of the change and nothing they
+would have to unlearn.
+
+- <what moves> — <where it lives>
+-->
+
+## Durable Outputs
+
+<!--
+Plan the lasting records this delivery must create or update before the spec is
+approved. This is repository-specific, not a fixed checklist. Consider user
+promise, current product truth, current architecture, decision rationale,
+interface compatibility, operations, maintainer procedure, release history, and
+reusable learning. Include only applicable roles.
+
+For each row, name:
+
+- Semantic role
+- Applicability
+- Destination
+- Owner
+- Expected evidence
+- Closeout condition
+
+If no durable output is applicable, write `none` with an explicit rationale.
+If a destination is ambiguous or absent, record the still-required decision as
+the closeout blocker; do not guess or create a placeholder. Read each applicable
+existing human-readable surface as a whole and name any refresh work before
+approval. For user-facing behavior, draft the established user-documentation
+surface before implementation approval.
+-->
+
+| Semantic role | Applicability | Destination | Owner | Expected evidence | Closeout condition |
+| --- | --- | --- | --- | --- | --- |
+| <role> | <why applicable / why absent> | <resolved path, external locator, or required decision> | <owner role or workflow> | <test, guide, contract, release, or review evidence> | <what close-work must verify> |
+
+## Agent Rules
 
 The three-tier guard that keeps an implementing agent inside the lines.
 *Always do* applies without asking; *Ask first* requires human sign-off
@@ -95,8 +151,15 @@ a behavior, the behavior is too vague — sharpen it before moving on.
 <!--
 The verifiable goals that close this spec. Each item should be checkable
 without subjective judgement — a reviewer can read it and know whether it
-holds. Notation: `- [ ]` open, `- [x]` met (see CONVENTIONS § 4 Spec
-metadata contract).
+holds. Notation: `- [ ]` open, `- [x]` met (see the `new-spec` skill's
+`references/spec-and-plan-contract.md` § Spec metadata contract). A newly Shipped spec has no open Acceptance Criteria.
+
+This section owns criterion *shape*. Before writing criteria, work the six
+failure classes in the `new-spec` skill's `references/spec-authoring-rubric.md`
+in order — they cover the failures shape rules cannot see, starting with a
+criterion that belongs to a different artifact. Two of those classes defer
+criterion shape back to this section; the rest defer elsewhere or own their own
+rules, and that reference states which.
 
 Two recurring sources of criteria, so they don't slip into the plan as
 mere design detail:
@@ -119,19 +182,86 @@ mere design detail:
   in the dependency scan". An NFR with no bar ("should be fast") is not a
   criterion; give it a number or move it to the plan.
 
+- A criterion that needs "and" to join two **different predicates** is two
+  criteria: a conjunction is where a coverage check silently passes while half
+  the criterion is unimplemented. A criterion is more than one when its parts
+  have separate failure modes with separate remedies. Where the parts read as one
+  constraint over a set, rewrite the criterion as a single predicate with a
+  member substituted in; it stays one criterion only if that predicate is
+  checkable as written at every member rather than expanding into a different
+  check per member. The worked examples below fix where this boundary falls;
+  where the cue and an example conflict, the examples govern.
+
+  - **E1 — splits.** "`writer.py` emits `manifest.json` with keys in byte-sorted
+    order, and `--dry-run` prints that manifest without writing a file." Two
+    different predicates; no single sentence covers both. The base case where the
+    conjunction cue and the split test agree.
+  - **E2 — stays one.** "no sensitive data reaches stdout, stderr, logs, or skill
+    output surfaced to the agent." One predicate substituted at each member of an
+    enumerated set, checkable as written at every member.
+  - **E3 — stays one.** "the digest preimage is the u64be path length, the path
+    bytes, the execute byte, the u64be content length, then the content bytes."
+    One comparison value expressed in parts — the split test never engages,
+    because there is one failure and one remedy.
+  - **E4 — splits.** "the same constraint, correctness, holds across stdout and
+    the exit code." "X is correct" is not checkable as written: it expands into a
+    different check per member. This is the anti-licence against reframing a
+    bundle as one constraint over a domain, and without it E2's shape is available
+    to any author.
+  - **E5 — stays one.** "session cookies are set `Secure` and `HttpOnly`."
+    Different failure modes (interception, script access) but one substitutable
+    predicate and one remedy. Shows that separate failure modes alone do not
+    split when the predicate survives substitution.
+
+- A universal claim enumerates its closed set or names the mechanism that makes
+  coverage exhaustive: without one, a reviewer cannot tell which members the
+  claim covers or whether an omitted member is a defect.
+
+- A new claim becomes a new checklist item, never a lettered or semicolon
+  graft: a graft hides a separately reviewable outcome inside an existing
+  criterion and makes its completion ambiguous.
+
+- For every numeric limit a criterion states, record the input that makes the
+  limit fire first and the enforcement mechanism that makes that ordering true;
+  a limit missing **either** fact is not yet a criterion. Where one quantity has
+  two limits, either order them so each is reachable for some input, or declare
+  one non-binding on that route and name the limit that fires instead.
+
+- A criterion stating a limit names the reference point it is measured from.
+  Choose an origin that gives the same input the same measurement however the
+  subject is organised; an unstated origin is not yet a criterion. A criterion
+  requiring a limit states its value and never asks an implementer to supply one:
+  a value invented to satisfy an unspecified requirement is worse than an absent
+  limit, because it reads as a decision that was made.
+
+- Make every claim earn its place by making a wrong implementation detectable.
+  Delete rationale, history, reassurance, restated context, and a figure that
+  merely explains where a threshold came from when it does not help establish the
+  outcome. Keep any claim that is the only written form of a comparison value,
+  such as a byte layout, exact key order, literal token, collection floor, or
+  stated bar. Ask: "could a wrong implementation now pass this?"
+
+- A criterion names an observable outcome. Naming a function's parameters, a
+  helper, or a call sequence is the give-away that the content belongs in the
+  plan. See the Outcome guidance and `SKILL.md`'s design-doc anti-pattern for
+  the document-level distinction.
+
 - [ ] <observable outcome>
 - [ ] <observable outcome>
 - [ ] <observable outcome>
 
-A criterion that ships unmet *on purpose* is never left silently unchecked —
-mark it deferred with a slug that resolves in `workspace.toml [backlog].open`:
+Do not use `(deferred: <slug>)` as a new shipping exception. If an accepted AC
+is still required, keep the spec `Implementing` and resume it. If a separable
+item no longer belongs in the final accepted contract, pause for a reviewed
+spec/plan amendment, remove it from this checklist, and record it under
+`Follow-ons` with its owner and stable artifact or external evidence reference.
+Historical frozen specs may still contain older `(deferred: <slug>)` markers;
+do not copy that pattern into new shipped work.
+-->
 
-- [ ] <observable outcome> (deferred: <slug>)
-
-where <slug> matches a `slug` field in `workspace.toml [backlog].open`.
-
+<!--
 Optional story trace: when this spec was derived from a product brief that
-carries user stories (Shape B; see receive-brief), append `Satisfies: US-n`
+carries user stories (Shape B; see author-delivery-brief continue), append `Satisfies: US-n`
 to each acceptance criterion that satisfies that story, so coverage is
 story-granular:
 
@@ -141,22 +271,54 @@ The marker is optional — omit it for a no-stories brief (Shape A) or a spec
 authored directly.
 -->
 
+## Follow-ons
+
+<!--
+Separately scoped work that does not belong to the final accepted AC set. Each
+entry needs an owner and a stable work-intake artifact or external evidence
+reference. Do not use this section to hide unfinished accepted intent.
+
+- <owner>: <stable artifact or external ref> — <one-sentence scope>
+-->
+
 ## Assumptions
 
 <!--
-Audit trail for the assumption-surfacing checkpoint that ran when this
-spec was drafted (see `new-spec` SKILL.md step 3). Each item names how
-it was settled. This section is *not* the contract — it's the frame the
-contract was written under. The contract lives above (Objective,
-Boundaries, Testing Strategy, Acceptance Criteria).
+What is still unresolved, and nothing else. Each item is a question the
+contract rests on that nobody has answered yet — so a reader sees the open
+questions instead of scrolling a list of facts that are already settled.
 
-Format: `- <category>: <fact> (source: <path | URL | probe | user
-confirmation YYYY-MM-DD>)`
+A fact you settled is not an assumption, and how you checked it is not
+recorded here: that was the assumption checkpoint's evidence (`new-spec`
+SKILL.md step 3), and its job ended when the fact entered the contract. Route
+each settled fact by what it does. A fact that bounds what this delivery does
+goes into `Outcome` or `Agent Rules`. A fact that shapes how it is built goes
+into the plan's `## Design (LLD)` or `## Constraints`. There is no third
+destination, and nothing is left behind here as a receipt.
 
-- Technical: <fact> (source: <…>)
-- Process: <fact> (source: <…>)
-- Product: <fact> (source: user confirmation YYYY-MM-DD)
+Unresolved comes in two shapes, and both belong here.
 
-If an assumption later turns out wrong, fix the spec body in the same
-PR and add a one-line note here recording what changed and why.
+An **open question** — something that could still be answered:
+`- <category>: <open question> — <what it would change> (settled by: <who or
+what can answer it>)`
+
+A **named gap** — something that will not be answered on this delivery, such
+as a dependency that is absent or a corpus that is unreachable:
+`- <category>: <what is missing> — <what is therefore ungrounded>`
+
+Write `none` when nothing is unresolved. An empty section and an unexamined
+one read the same.
+
+- Technical: <open question> — <what it would change> (settled by: <…>)
+- Product: <what is missing> — <what is therefore ungrounded>
+
+When an item is settled later, route the fact to its destination above and
+delete the line. An item still here at approval is a known gap in the
+contract, recorded on purpose.
+
+A settled fact that later turns out wrong is a different event, and it does
+not come back here. Fix it where it lives — the spec body, or the plan's
+design — in the same PR that finds it, and say in that PR what changed. The
+correction belongs in the artifact the fact was doing work in, not in a note
+about the checkpoint that filed it.
 -->
