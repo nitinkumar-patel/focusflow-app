@@ -37,8 +37,8 @@
   - **Next.js (App Router) + TypeScript** for the UI — Server Actions /
     Route Handlers act as the BFF layer that calls FastAPI. Built with
     `output: "standalone"` for a minimal Docker image.
-  - **FastAPI + Python 3.13** for the API — owns `users`, `tasks`, and
-    `pomodoro_sessions`. Every route is a FastAPI path operation function
+  - **FastAPI + Python 3.13** for the API — owns `users`, `tasks`,
+    `pomodoro_sessions`, and `active_timers`. Every route is a FastAPI path operation function
     with a Pydantic v2 request/response model; that's the contract new
     endpoints conform to.
   - **SQLAlchemy 2.0 (async, `asyncpg`) + Alembic** for persistence and
@@ -60,9 +60,27 @@
 
 - **Component stereotypes.**
   - **A FastAPI *router module*** owns one resource (`auth`, `tasks`,
-    `sessions`, `analytics`) — path operations, Pydantic schemas, and the
+    `timer`, `analytics`) — path operations, Pydantic schemas, and the
     SQLAlchemy queries for that resource live together in
     `apps/api/app/<resource>/`.
+  - **`apps/api/app/timer/`** owns the running Pomodoro timer: the
+    `/timer` routes (`POST /timer/start`, `GET /timer`, `POST
+    /timer/stop`) and settlement (`settlement.py`). The countdown is
+    server-side: the `active_timers` table holds at most one row per user
+    (the primary key is `user_id`) with the phase, start time, and
+    duration; the end time is derived. Settlement runs under a row lock:
+    when a work phase has ended it inserts one `pomodoro_sessions` row and
+    starts the break (long after every 4th completed Pomodoro, otherwise
+    short); a finished break deletes the row. Breaks exist only in
+    `active_timers` and are never sessions. There is no client-posted
+    session route. See
+    [the feature spec](../specs/task-priority-focus-timer/spec.md).
+  - **Cross-resource call.** The `tasks` router (`GET /tasks`) and the
+    `analytics` router (`GET /analytics/focus-time`) call `app/timer`
+    settlement before their own queries so completed counts and focus
+    totals are never stale. The analytics router already reads other
+    resources' models; the settlement call follows the same pattern
+    rather than a new layer.
   - **A SQLAlchemy *model*** is the single definition of a persisted
     entity; Pydantic schemas are derived/mirrored from it, never the
     other way around.

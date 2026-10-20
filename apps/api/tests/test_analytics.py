@@ -2,8 +2,11 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.models import ActiveTimer, PomodoroSession
+from app.timer.settlement import settle_timer
 
 SECRET_HEADER = {"X-Internal-Secret": settings.internal_api_secret}
 
@@ -29,28 +32,28 @@ async def _create_task(client: AsyncClient, user_id: uuid.UUID, title: str) -> u
 
 
 async def _record_session(
-    client: AsyncClient, user_id: uuid.UUID, task_id: uuid.UUID, started: datetime, seconds: int
+    db: AsyncSession, task_id: uuid.UUID, started: datetime, seconds: int
 ) -> None:
-    ended = started + timedelta(seconds=seconds)
-    response = await client.post(
-        f"/tasks/{task_id}/sessions",
-        json={
-            "started_at": started.isoformat(),
-            "ended_at": ended.isoformat(),
-            "duration_seconds": seconds,
-        },
-        headers=_headers(user_id),
+    # Direct row insert: the sessions route is gone (AC19); sessions now
+    # come only from timer settlement.
+    db.add(
+        PomodoroSession(
+            task_id=task_id,
+            started_at=started,
+            ended_at=started + timedelta(seconds=seconds),
+            duration_seconds=seconds,
+        )
     )
-    assert response.status_code == 201
+    await db.commit()
 
 
-async def test_by_day_sums_seeded_sessions(client: AsyncClient) -> None:
+async def test_by_day_sums_seeded_sessions(client: AsyncClient, db_session: AsyncSession) -> None:
     user_id = await _register_user(client, "analytics-by-day@example.com")
     task_id = await _create_task(client, user_id, "Deep work")
 
     now = datetime.now(UTC)
     started_at = now - timedelta(seconds=1500)
-    await _record_session(client, user_id, task_id, started_at, 1500)
+    await _record_session(db_session, task_id, started_at, 1500)
 
     response = await client.get("/analytics/focus-time", headers=_headers(user_id))
     assert response.status_code == 200
@@ -64,12 +67,12 @@ async def test_by_day_sums_seeded_sessions(client: AsyncClient) -> None:
     assert expected_bucket["minutes"] == 25.0
 
 
-async def test_by_task_sums_seeded_sessions(client: AsyncClient) -> None:
+async def test_by_task_sums_seeded_sessions(client: AsyncClient, db_session: AsyncSession) -> None:
     user_id = await _register_user(client, "analytics-by-task@example.com")
     task_id = await _create_task(client, user_id, "Deep work")
 
     now = datetime.now(UTC)
-    await _record_session(client, user_id, task_id, now - timedelta(seconds=1500), 1500)
+    await _record_session(db_session, task_id, now - timedelta(seconds=1500), 1500)
 
     response = await client.get("/analytics/focus-time", headers=_headers(user_id))
     assert response.status_code == 200
@@ -79,7 +82,9 @@ async def test_by_task_sums_seeded_sessions(client: AsyncClient) -> None:
     assert body["by_task"][0]["minutes"] == 25.0
 
 
-async def test_by_task_is_not_windowed_by_days(client: AsyncClient) -> None:
+async def test_by_task_is_not_windowed_by_days(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
     # by_task is all-time, unlike by_day's `days` window — AC9's empty
     # state is defined by "no recorded sessions" ever, not "none in the
     # last N days" (Design decisions / round-1 REVIEW finding).
@@ -87,7 +92,7 @@ async def test_by_task_is_not_windowed_by_days(client: AsyncClient) -> None:
     task_id = await _create_task(client, user_id, "Old task")
 
     old_start = datetime.now(UTC) - timedelta(days=30)
-    await _record_session(client, user_id, task_id, old_start, 1500)
+    await _record_session(db_session, task_id, old_start, 1500)
 
     response = await client.get(
         "/analytics/focus-time", params={"days": 7}, headers=_headers(user_id)
@@ -102,11 +107,13 @@ async def test_by_task_is_not_windowed_by_days(client: AsyncClient) -> None:
     assert all(bucket["minutes"] == 0 for bucket in body["by_day"])
 
 
-async def test_by_day_is_zero_filled_to_days_param(client: AsyncClient) -> None:
+async def test_by_day_is_zero_filled_to_days_param(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
     user_id = await _register_user(client, "analytics-zero-fill@example.com")
     task_id = await _create_task(client, user_id, "Task")
     now = datetime.now(UTC)
-    await _record_session(client, user_id, task_id, now - timedelta(seconds=60), 60)
+    await _record_session(db_session, task_id, now - timedelta(seconds=60), 60)
 
     response = await client.get(
         "/analytics/focus-time", params={"days": 7}, headers=_headers(user_id)
@@ -117,7 +124,7 @@ async def test_by_day_is_zero_filled_to_days_param(client: AsyncClient) -> None:
     assert len(zero_days) == 6
 
 
-async def test_by_day_buckets_in_utc(client: AsyncClient) -> None:
+async def test_by_day_buckets_in_utc(client: AsyncClient, db_session: AsyncSession) -> None:
     user_id = await _register_user(client, "analytics-utc-bucket@example.com")
     task_id = await _create_task(client, user_id, "Task")
 
@@ -135,8 +142,8 @@ async def test_by_day_buckets_in_utc(client: AsyncClient) -> None:
     # Yesterday's session first, so it's not "recent" when today's is
     # submitted — otherwise T7's rapid-duplicate-for-same-task guard
     # would reject the second request.
-    await _record_session(client, user_id, task_id, yesterday_started_at, 60)
-    await _record_session(client, user_id, task_id, today_started_at, 60)
+    await _record_session(db_session, task_id, yesterday_started_at, 60)
+    await _record_session(db_session, task_id, today_started_at, 60)
 
     response = await client.get(
         "/analytics/focus-time", params={"days": 7}, headers=_headers(user_id)
@@ -157,7 +164,7 @@ async def test_by_day_buckets_in_utc(client: AsyncClient) -> None:
 
 
 async def test_by_day_buckets_in_utc_even_when_db_session_timezone_is_not(
-    non_utc_client: AsyncClient,
+    non_utc_client: AsyncClient, db_session: AsyncSession
 ) -> None:
     # round-16 REVIEW finding: test_by_day_buckets_in_utc above only ever
     # ran against the default (UTC) session timezone, so router.py's
@@ -185,8 +192,8 @@ async def test_by_day_buckets_in_utc_even_when_db_session_timezone_is_not(
     )
     prior_day_started_at = anchor_day_started_at - timedelta(days=1)
 
-    await _record_session(client, user_id, task_id, prior_day_started_at, 60)
-    await _record_session(client, user_id, task_id, anchor_day_started_at, 60)
+    await _record_session(db_session, task_id, prior_day_started_at, 60)
+    await _record_session(db_session, task_id, anchor_day_started_at, 60)
 
     response = await client.get(
         "/analytics/focus-time", params={"days": 7}, headers=_headers(user_id)
@@ -219,13 +226,13 @@ async def test_days_param_out_of_range_422(client: AsyncClient) -> None:
     assert response.status_code == 422
 
 
-async def test_excludes_other_users_sessions(client: AsyncClient) -> None:
+async def test_excludes_other_users_sessions(client: AsyncClient, db_session: AsyncSession) -> None:
     alice_id = await _register_user(client, "alice-analytics@example.com")
     bob_id = await _register_user(client, "bob-analytics@example.com")
     alice_task = await _create_task(client, alice_id, "Alice's task")
 
     now = datetime.now(UTC)
-    await _record_session(client, alice_id, alice_task, now - timedelta(seconds=1500), 1500)
+    await _record_session(db_session, alice_task, now - timedelta(seconds=1500), 1500)
 
     response = await client.get("/analytics/focus-time", headers=_headers(bob_id))
     body = response.json()
@@ -244,3 +251,61 @@ async def test_no_sessions_returns_zero_filled_by_day_and_empty_by_task(
     assert len(body["by_day"]) == 7
     assert all(b["minutes"] == 0 for b in body["by_day"])
     assert body["by_task"] == []
+
+
+async def test_elapsed_work_phase_counted_without_prior_timer_read(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    # AC11 + AC20: analytics settles first; one elapsed 25-minute work
+    # phase adds 25 minutes to by_task and to by_day on the UTC start date.
+    user_id = await _register_user(client, "analytics-settle@example.com")
+    task_id = await _create_task(client, user_id, "Settled")
+    started = datetime.now(UTC) - timedelta(seconds=1500 + 30)
+    db_session.add(
+        ActiveTimer(
+            user_id=user_id,
+            task_id=task_id,
+            phase="work",
+            started_at=started,
+            duration_seconds=1500,
+        )
+    )
+    await db_session.commit()
+
+    response = await client.get("/analytics/focus-time", headers=_headers(user_id))
+    assert response.status_code == 200
+    body = response.json()
+    assert [(t["task_id"], t["minutes"]) for t in body["by_task"]] == [(str(task_id), 25.0)]
+    bucket = next(b for b in body["by_day"] if b["date"] == started.date().isoformat())
+    assert bucket["minutes"] == 25.0
+
+
+async def test_settlement_adds_25_minutes_to_existing_totals(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    user_id = await _register_user(client, "analytics-settle-delta@example.com")
+    task_id = await _create_task(client, user_id, "Delta")
+    base = datetime.now(UTC) - timedelta(days=2)
+    await _record_session(db_session, task_id, base, 600)
+    before = (await client.get("/analytics/focus-time", headers=_headers(user_id))).json()
+
+    phase_start = datetime.now(UTC) - timedelta(seconds=1500 + 10)
+    db_session.add(
+        ActiveTimer(
+            user_id=user_id,
+            task_id=task_id,
+            phase="work",
+            started_at=phase_start,
+            duration_seconds=1500,
+        )
+    )
+    await db_session.commit()
+    await settle_timer(db_session, user_id, datetime.now(UTC))
+    await db_session.commit()
+
+    after = (await client.get("/analytics/focus-time", headers=_headers(user_id))).json()
+    assert after["by_task"][0]["minutes"] == before["by_task"][0]["minutes"] + 25.0
+    day = phase_start.date().isoformat()
+    day_before = next(b for b in before["by_day"] if b["date"] == day)["minutes"]
+    day_after = next(b for b in after["by_day"] if b["date"] == day)["minutes"]
+    assert day_after == day_before + 25.0

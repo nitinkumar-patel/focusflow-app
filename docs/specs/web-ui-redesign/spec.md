@@ -16,13 +16,14 @@
 
 FocusFlow's self-hosting single user gets a web app that looks and feels
 like a finished product instead of unstyled default HTML: every screen —
-Tasks with the Pomodoro timer, Analytics, Login, and Signup, plus the
+Tasks, the Focus timer view, Analytics, Login, and Signup, plus the
 shared nav/layout chrome — uses a coherent, clean, modern visual design
 built on Tailwind CSS utility classes and a small set of shared design
 tokens. The user controls light vs. dark theme with a visible toggle;
 their choice persists across reloads and sessions, and the app never
 flashes the wrong theme on first paint. Every existing functional
-behavior (auth, task management, timer, session recording, analytics)
+behavior (auth, task management, the focus timer, server-recorded
+sessions, analytics)
 keeps working exactly as it does today — this is a presentation-layer
 change, not a behavior change.
 
@@ -42,9 +43,11 @@ change, not a behavior change.
   `app/(app)/layout.tsx`, `app/(app)/tasks/page.tsx`,
   `app/(app)/analytics/page.tsx`, `app/(auth)/login/page.tsx`,
   `app/(auth)/signup/page.tsx`, and their component trees
-  (`PomodoroTimer`, `TaskForm`, `TaskList`, `FocusTimeChart`,
+  (`FocusTimer`, `TaskForm`, `TaskList`, `FocusTimeChart`,
   `LoginForm`, `SignUpForm`, `LogoutButton`).
-- Preserve every existing Server Action call, data-fetching path, and
+- Preserve every Server Action call and data-fetching path (the timer
+  now being the focus view of
+  `docs/specs/task-priority-focus-timer/spec.md`), and
   accessibility semantic (e.g. `role="alert"` on error states) — only
   markup/classes change, not component logic or wiring.
 - Meet WCAG 2.2 AA contrast in both themes and keep every interactive
@@ -172,7 +175,9 @@ just "looks good," per `work-loop`'s verification-modes contract.
       reference this AC rather than restating the numbers.
 - [ ] AC5: Given the redesign, when compared against current behavior,
       every existing functional flow — signup, login, logout, task
-      creation, Pomodoro timer start/stop/complete, session recording,
+      creation, focus-view timer start/stop and break skipping (see
+      `docs/specs/task-priority-focus-timer/spec.md`),
+      server-recorded sessions,
       analytics rendering, and every error state — works identically;
       the full existing test suite passes (tests may be updated for new
       markup/selectors, but must assert the same observable behavior).
@@ -187,7 +192,7 @@ just "looks good," per `work-loop`'s verification-modes contract.
       assistive technology, it is reachable, operable, exposes an
       accessible name (e.g. `aria-label="Toggle theme"`), and exposes
       its current state via `aria-pressed`.
-- [ ] AC8: Given each in-scope screen (Tasks+Timer, Analytics, Login,
+- [ ] AC8: Given each in-scope screen (Tasks, Focus, Analytics, Login,
       Signup, shared header/nav), when reviewed in both themes, the
       result is recorded in `qa-log.md` as a coherent, intentional
       visual design (consistent spacing, type scale, and color use
@@ -217,7 +222,7 @@ just "looks good," per `work-loop`'s verification-modes contract.
 - Product: FocusFlow is single-player/single-tenant by design — no
   multi-user theme-sharing or org-level settings to consider (source:
   `docs/CHARTER.md`: "FocusFlow is single-player by design").
-- Product: scope is the whole web app — Tasks+Timer, Analytics,
+- Product: scope is the whole web app — Tasks, Focus, Analytics,
   Login/Signup, and shared layout/chrome — with a user-toggleable,
   persisted light/dark theme and a "clean and modern" aesthetic, agent's
   creative latitude on visual direction (source: user confirmation

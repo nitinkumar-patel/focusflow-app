@@ -10,7 +10,7 @@ export default async function AnalyticsPage() {
   if (!result.ok) {
     return (
       <div className="flex flex-col gap-6">
-        <h1 className="text-2xl font-semibold text-foreground">Analytics</h1>
+        <h1 className="text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">Analytics</h1>
         <p role="alert" className="text-sm text-danger">{safeErrorMessage(result)}</p>
       </div>
     );
@@ -21,7 +21,7 @@ export default async function AnalyticsPage() {
   if (byTask.length === 0) {
     return (
       <div className="flex flex-col gap-6">
-        <h1 className="text-2xl font-semibold text-foreground">Analytics</h1>
+        <h1 className="text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">Analytics</h1>
         <p className="rounded-lg border border-dashed border-border bg-surface px-4 py-8 text-center text-muted-foreground">
           No focus time recorded yet. Run a Pomodoro session against a task to see it here.
         </p>
@@ -31,7 +31,7 @@ export default async function AnalyticsPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <h1 className="text-2xl font-semibold text-foreground">Analytics</h1>
+      <h1 className="text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">Analytics</h1>
       <section className="flex flex-col gap-4 rounded-lg border border-border bg-surface p-4">
         <h2 className="text-lg font-medium text-foreground">Focus time per day</h2>
         <FocusTimeChart byDay={byDay} />

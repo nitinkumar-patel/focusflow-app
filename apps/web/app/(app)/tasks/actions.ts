@@ -5,10 +5,17 @@ import { revalidatePath } from "next/cache";
 import { apiFetch, safeErrorMessage, type ApiResult } from "@/lib/api-client";
 import { auth } from "@/lib/auth";
 
+export type Priority = "high" | "medium" | "low";
+
+const PRIORITIES: readonly string[] = ["high", "medium", "low"];
+
 export interface Task {
   id: string;
   title: string;
   created_at: string;
+  priority: Priority;
+  estimated_pomodoros: number;
+  completed_pomodoros: number;
 }
 
 // AC16: the user id sent to apps/api comes only from the validated
@@ -49,10 +56,35 @@ export async function createTaskAction(
     return { error: "Task title must be between 1 and 200 characters." };
   }
 
+  // Defense in depth again — priority and estimate are form fields too.
+  // An absent field is omitted so the API applies its defaults
+  // (medium / 1); a present-but-invalid one is rejected here.
+  const body: { title: string; priority?: Priority; estimated_pomodoros?: number } = { title };
+
+  const rawPriority = formData.get("priority");
+  if (rawPriority !== null) {
+    if (typeof rawPriority !== "string" || !PRIORITIES.includes(rawPriority)) {
+      return { error: "Priority must be High, Medium, or Low." };
+    }
+    body.priority = rawPriority as Priority;
+  }
+
+  const rawEstimate = formData.get("estimated_pomodoros");
+  if (rawEstimate !== null) {
+    const estimate =
+      typeof rawEstimate === "string" && /^\d{1,3}$/.test(rawEstimate)
+        ? Number(rawEstimate)
+        : NaN;
+    if (!Number.isInteger(estimate) || estimate < 1 || estimate > 20) {
+      return { error: "Estimated Pomodoros must be a whole number from 1 to 20." };
+    }
+    body.estimated_pomodoros = estimate;
+  }
+
   const result = await apiFetch<Task>("/tasks", {
     method: "POST",
     userId: session.user.id,
-    body: { title },
+    body,
   });
 
   if (!result.ok) {
@@ -68,72 +100,4 @@ export async function createTaskAction(
 
   revalidatePath("/tasks");
   return {};
-}
-
-export interface PomodoroSession {
-  id: string;
-  task_id: string;
-  started_at: string;
-  ended_at: string;
-  duration_seconds: number;
-}
-
-export interface RecordSessionResult {
-  ok: boolean;
-  error?: string;
-}
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// Mirrors apps/api's MAX_WORK_INTERVAL_SECONDS (AC5's canonical 25
-// minutes) — independently hardcoded per plan.md's Design decisions.
-const MAX_WORK_INTERVAL_SECONDS = 1500;
-
-// Called by PomodoroTimer when a work interval finishes naturally — see
-// AC6/AC7 (never called for a break, never called on early stop).
-export async function recordSessionAction(
-  taskId: string,
-  startedAt: string,
-  endedAt: string,
-  durationSeconds: number,
-): Promise<RecordSessionResult> {
-  const session = await auth();
-  if (!session?.user?.id) {
-    return { ok: false, error: "You must be logged in." };
-  }
-
-  // Defense in depth (spec Boundaries § Always do) — PomodoroTimer is
-  // client code, so these arguments are as browser-controlled as any
-  // form field, even though this action isn't itself a <form> action.
-  if (
-    !UUID_RE.test(taskId) ||
-    Number.isNaN(Date.parse(startedAt)) ||
-    Number.isNaN(Date.parse(endedAt)) ||
-    !Number.isInteger(durationSeconds) ||
-    durationSeconds < 1 ||
-    durationSeconds > MAX_WORK_INTERVAL_SECONDS
-  ) {
-    return { ok: false, error: "Invalid session data." };
-  }
-
-  const result = await apiFetch<PomodoroSession>(`/tasks/${taskId}/sessions`, {
-    method: "POST",
-    userId: session.user.id,
-    body: { started_at: startedAt, ended_at: endedAt, duration_seconds: durationSeconds },
-  });
-
-  if (!result.ok) {
-    // Filtered here too (round-5 REVIEW finding) — even though this
-    // action isn't useActionState-bound, so its result doesn't persist
-    // into the page's hydration payload, an unfiltered raw string is
-    // still visible in this request's own Network-tab response. Same
-    // rule as createTaskAction/signUpAction: filter before returning,
-    // don't rely on the caller to filter at render time.
-    return { ok: false, error: safeErrorMessage(result) };
-  }
-
-  // The timer lives on /tasks; the chart lives on /analytics — a
-  // completed session changes what both would show.
-  revalidatePath("/tasks");
-  revalidatePath("/analytics");
-  return { ok: true };
 }

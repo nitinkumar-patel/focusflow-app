@@ -100,6 +100,12 @@ describe("apiFetch", () => {
     expect(result).toEqual({ ok: true, data: { id: "1" } });
   });
 
+  it("returns ok with no data on a 204 response instead of a parse failure", async () => {
+    global.fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    const result = await apiFetch<undefined>("/timer/stop", { method: "POST" });
+    expect(result).toEqual({ ok: true, data: undefined });
+  });
+
   it("treats a stalled apps/api as unreachable once the timeout fires, not a hang", async () => {
     // Asserting only `init.signal instanceof AbortSignal` (the
     // original version of this test) passes just as well if the

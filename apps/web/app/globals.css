@@ -12,6 +12,7 @@
   --accent: #4338ca;
   --muted-foreground: #525252;
   --danger: #b91c1c;
+  --break: #0f766e;
 }
 
 /* Must stay after :root — equal specificity, so later wins. */
@@ -25,6 +26,7 @@
   --accent: #a5b4fc;
   --muted-foreground: #a3a3a3;
   --danger: #f87171;
+  --break: #5eead4;
 }
 
 @theme inline {
@@ -36,6 +38,7 @@
   --color-accent: var(--accent);
   --color-muted-foreground: var(--muted-foreground);
   --color-danger: var(--danger);
+  --color-break: var(--break);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }

@@ -40,3 +40,22 @@ def test_starts_when_both_secrets_set(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("INTERNAL_API_SECRET", "set")
     monkeypatch.setenv("POSTGRES_PASSWORD", "set")
     Settings().fail_closed_on_missing_secrets()  # must not raise
+
+
+def test_default_phase_durations_when_override_unset_or_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = {"work": 1500, "short_break": 300, "long_break": 900}
+    monkeypatch.delenv("POMODORO_TEST_SHORT_INTERVALS", raising=False)
+    assert Settings().phase_durations_seconds == expected
+    monkeypatch.setenv("POMODORO_TEST_SHORT_INTERVALS", "")
+    assert Settings().phase_durations_seconds == expected
+
+
+def test_short_phase_durations_when_override_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("POMODORO_TEST_SHORT_INTERVALS", "1")
+    assert Settings().phase_durations_seconds == {
+        "work": 60,
+        "short_break": 15,
+        "long_break": 30,
+    }

@@ -36,7 +36,7 @@
   Handlers act as the backend-for-frontend). Owns auth session management
   via NextAuth. Entry point: `app/page.tsx`.
 - `apps/api/` — the FastAPI backend (Python 3.13). Owns all persisted data
-  (`users`, `tasks`, `pomodoro_sessions`) via SQLAlchemy + Alembic against
+  (`users`, `tasks`, `pomodoro_sessions`, `active_timers`) via SQLAlchemy + Alembic against
   PostgreSQL. Not reachable from the browser — only `apps/web` calls it,
   over the internal Docker network. Entry point: `app/main.py`.
 - `apps/nginx/` — reverse-proxy config + Dockerfile. The only component

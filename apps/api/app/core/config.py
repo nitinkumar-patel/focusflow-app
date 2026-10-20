@@ -18,6 +18,10 @@ def _build_database_url(dbname: str, user: str, password: str) -> str:
     return f"postgresql+asyncpg://{user}:{password}@db:5432/{dbname}"
 
 
+DEFAULT_PHASE_DURATIONS_SECONDS = {"work": 1500, "short_break": 300, "long_break": 900}
+SHORT_PHASE_DURATIONS_SECONDS = {"work": 60, "short_break": 15, "long_break": 30}
+
+
 class Settings:
     def __init__(self) -> None:
         self.internal_api_secret = os.environ.get("INTERNAL_API_SECRET", "")
@@ -29,6 +33,12 @@ class Settings:
         )
         self.database_url_test = _build_database_url(
             f"{self.postgres_db}_test", self.postgres_user, self.postgres_password
+        )
+        # Presence-based: any non-empty value selects the short QA durations.
+        self.phase_durations_seconds = (
+            SHORT_PHASE_DURATIONS_SECONDS
+            if os.environ.get("POMODORO_TEST_SHORT_INTERVALS")
+            else DEFAULT_PHASE_DURATIONS_SECONDS
         )
 
     def required_secrets(self) -> dict[str, str]:

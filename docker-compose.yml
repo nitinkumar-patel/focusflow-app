@@ -26,12 +26,18 @@ services:
       context: ./apps/api
       target: dev
     # Explicit list (not env_file: .env), same reasoning as web below —
-    # api has no use for AUTH_SECRET or POMODORO_TEST_SHORT_INTERVALS.
+    # api has no use for AUTH_SECRET; it reads POMODORO_TEST_SHORT_INTERVALS
+    # (the QA short-durations override) to pick the timer phase durations.
     environment:
+      POMODORO_TEST_SHORT_INTERVALS: ${POMODORO_TEST_SHORT_INTERVALS:-}
       INTERNAL_API_SECRET: ${INTERNAL_API_SECRET}
       POSTGRES_USER: ${POSTGRES_USER:-focusflow}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:-focusflow}
+    # Read-only, so the contract test (tests/test_openapi_contract.py) can
+    # read the OpenAPI file from inside the api image (AC25).
+    volumes:
+      - ./contracts/openapi:/contracts/openapi:ro
     depends_on:
       db:
         condition: service_healthy
@@ -58,7 +64,6 @@ services:
       AUTH_SECRET: ${AUTH_SECRET}
       INTERNAL_API_SECRET: ${INTERNAL_API_SECRET}
       API_BASE_URL: ${API_BASE_URL}
-      POMODORO_TEST_SHORT_INTERVALS: ${POMODORO_TEST_SHORT_INTERVALS:-}
     depends_on:
       - api
     restart: unless-stopped

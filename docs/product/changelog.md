@@ -11,6 +11,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > newest-first. Rewrite entries for users, not contributors — see the
 > [Common Changelog guidance](https://common-changelog.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Task priority and expected Pomodoros** — set a priority (high, medium,
+  low) and an expected number of Pomodoros on each task; the Tasks screen
+  shows completed versus expected Pomodoros and marks the task in
+  progress. See `docs/guides/how-to/use-priorities-and-the-focus-timer.md`.
+- **Focus view** — a new `/focus` page with a circular countdown, reached
+  from the header "Focus" link or by starting a task.
+
+### Changed
+
+- **The timer now runs on the server.** Reloading the page or opening a
+  second tab shows the same countdown, and breaks (5 minutes, or 15 after
+  every 4th completed Pomodoro) start automatically. Only one timer can
+  run at a time. `POMODORO_TEST_SHORT_INTERVALS` is now read by the api
+  service.
+
+### Removed
+
+- `POST /tasks/{task_id}/sessions`: sessions are recorded by the server when
+  a work phase ends. The in-browser timer was replaced by the focus view.
+
 ## [0.1.0] — 2026-08-17
 
 ### Added

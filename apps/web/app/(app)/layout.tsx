@@ -1,22 +1,16 @@
-import Link from "next/link";
-
+import { AppNav } from "@/components/AppNav";
 import { LogoutButton } from "@/components/LogoutButton";
+import { SiteHeader } from "@/components/SiteHeader";
 
-// Shared authenticated shell for /tasks and /analytics. The nav links
-// and "Log out" control here are layout chrome, not either screen's
-// primary action — they don't count against AC13's one-primary-action
-// limit (spec AC13).
+// Shared authenticated shell for /tasks, /focus and /analytics. The nav
+// links and "Log out" control are layout chrome, not any screen's
+// primary action — they don't count against walking-skeleton AC13's
+// one-primary-action limit.
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
-    <div>
-      <nav className="flex flex-wrap items-center gap-1 border-b border-border bg-surface px-4 pb-2 sm:px-6">
-        <Link href="/tasks" className="rounded-md px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-background hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">Tasks</Link>
-        <Link href="/analytics" className="rounded-md px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-background hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">Analytics</Link>
-        <div className="ml-auto">
-          <LogoutButton />
-        </div>
-      </nav>
-      <main>{children}</main>
-    </div>
+    <>
+      <SiteHeader nav={<AppNav />} actions={<LogoutButton />} />
+      <main className="mx-auto w-full max-w-3xl flex-1 px-4 py-8 sm:px-6 sm:py-10">{children}</main>
+    </>
   );
 }

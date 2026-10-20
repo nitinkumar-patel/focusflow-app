@@ -3,40 +3,38 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
+from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import require_internal_secret, require_user_id
 from app.db.session import get_db_session
 from app.models import PomodoroSession, Task
+from app.timer.settlement import settle_timer
 
 router = APIRouter(
     prefix="/tasks", tags=["tasks"], dependencies=[Depends(require_internal_secret)]
 )
 
-# AC5's canonical work-interval length, hardcoded here per plan.md's
-# Design decisions (independently hardcoded on both runtimes, not shared
-# via env var — the spec's Ask-first boundary on AC5 is what keeps the
-# two copies in sync).
-MAX_WORK_INTERVAL_SECONDS = 1500
-DURATION_TOLERANCE_SECONDS = 2
-CLOCK_SKEW_TOLERANCE_SECONDS = 60
-RAPID_DUPLICATE_WINDOW_SECONDS = 60
-
-
 class CreateTaskRequest(BaseModel):
+    # strict: reject "3" and 2.5 rather than coercing them (AC2).
+    model_config = ConfigDict(strict=True)
+
     title: str = Field(min_length=1, max_length=200)
+    priority: Literal["high", "medium", "low"] = "medium"
+    estimated_pomodoros: int = Field(default=1, ge=1, le=20)
 
 
 class TaskResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
     id: uuid.UUID
     title: str
+    priority: str
+    estimated_pomodoros: int
+    completed_pomodoros: int
     created_at: datetime
 
 
@@ -44,11 +42,35 @@ class TaskResponse(BaseModel):
 async def list_tasks(
     user_id: uuid.UUID = Depends(require_user_id),
     db: AsyncSession = Depends(get_db_session),
-) -> list[Task]:
-    result = await db.execute(
-        select(Task).where(Task.user_id == user_id).order_by(Task.created_at.desc())
+) -> list[TaskResponse]:
+    # Settle first so counts are never stale (AC11); committed like the
+    # timer routes do.
+    await settle_timer(db, user_id, datetime.now(UTC))
+    await db.commit()
+
+    completed = (
+        select(func.count(PomodoroSession.id))
+        .where(PomodoroSession.task_id == Task.id)
+        .correlate(Task)
+        .scalar_subquery()
     )
-    return list(result.scalars().all())
+    rank = case({"high": 0, "medium": 1}, value=Task.priority, else_=2)
+    result = await db.execute(
+        select(Task, completed.label("completed_pomodoros"))
+        .where(Task.user_id == user_id)
+        .order_by(rank, Task.created_at.desc())
+    )
+    return [
+        TaskResponse(
+            id=task.id,
+            title=task.title,
+            priority=task.priority,
+            estimated_pomodoros=task.estimated_pomodoros,
+            completed_pomodoros=count,
+            created_at=task.created_at,
+        )
+        for task, count in result.all()
+    ]
 
 
 @router.post("", response_model=TaskResponse, status_code=201)
@@ -56,89 +78,21 @@ async def create_task(
     body: CreateTaskRequest,
     user_id: uuid.UUID = Depends(require_user_id),
     db: AsyncSession = Depends(get_db_session),
-) -> Task:
-    task = Task(user_id=user_id, title=body.title)
+) -> TaskResponse:
+    task = Task(
+        user_id=user_id,
+        title=body.title,
+        priority=body.priority,
+        estimated_pomodoros=body.estimated_pomodoros,
+    )
     db.add(task)
     await db.commit()
     await db.refresh(task)
-    return task
-
-
-class RecordSessionRequest(BaseModel):
-    started_at: datetime
-    ended_at: datetime
-    duration_seconds: int = Field(gt=0)
-
-
-class SessionResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: uuid.UUID
-    task_id: uuid.UUID
-    started_at: datetime
-    ended_at: datetime
-    duration_seconds: int
-
-
-@router.post("/{task_id}/sessions", response_model=SessionResponse, status_code=201)
-async def record_session(
-    task_id: uuid.UUID,
-    body: RecordSessionRequest,
-    user_id: uuid.UUID = Depends(require_user_id),
-    db: AsyncSession = Depends(get_db_session),
-) -> PomodoroSession:
-    task_result = await db.execute(
-        select(Task).where(Task.id == task_id, Task.user_id == user_id)
+    return TaskResponse(
+        id=task.id,
+        title=task.title,
+        priority=task.priority,
+        estimated_pomodoros=task.estimated_pomodoros,
+        completed_pomodoros=0,
+        created_at=task.created_at,
     )
-    if task_result.scalar_one_or_none() is None:
-        # Same response whether the task doesn't exist or belongs to
-        # another user — never confirms which (AC14).
-        raise HTTPException(status_code=404, detail="task not found")
-
-    started_at = body.started_at
-    ended_at = body.ended_at
-    if started_at.tzinfo is None or ended_at.tzinfo is None:
-        raise HTTPException(
-            status_code=422, detail="started_at and ended_at must be timezone-aware"
-        )
-
-    now = datetime.now(UTC)
-    if ended_at > now + timedelta(seconds=CLOCK_SKEW_TOLERANCE_SECONDS):
-        raise HTTPException(status_code=422, detail="ended_at is too far in the future")
-
-    actual_seconds = (ended_at - started_at).total_seconds()
-    if abs(actual_seconds - body.duration_seconds) > DURATION_TOLERANCE_SECONDS:
-        raise HTTPException(
-            status_code=422,
-            detail="duration_seconds does not match ended_at - started_at",
-        )
-
-    if body.duration_seconds > MAX_WORK_INTERVAL_SECONDS:
-        raise HTTPException(
-            status_code=422, detail="duration_seconds exceeds the maximum work interval"
-        )
-
-    recent_cutoff = now - timedelta(seconds=RAPID_DUPLICATE_WINDOW_SECONDS)
-    recent_result = await db.execute(
-        select(PomodoroSession)
-        .where(
-            PomodoroSession.task_id == task_id,
-            PomodoroSession.ended_at >= recent_cutoff,
-        )
-        .limit(1)
-    )
-    if recent_result.scalars().first() is not None:
-        raise HTTPException(
-            status_code=422, detail="a session for this task was just recorded"
-        )
-
-    session_row = PomodoroSession(
-        task_id=task_id,
-        started_at=started_at,
-        ended_at=ended_at,
-        duration_seconds=body.duration_seconds,
-    )
-    db.add(session_row)
-    await db.commit()
-    await db.refresh(session_row)
-    return session_row

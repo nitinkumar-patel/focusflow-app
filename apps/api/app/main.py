@@ -13,6 +13,7 @@ from app.auth.router import router as auth_router
 from app.core.config import settings
 from app.db.session import check_db_connection
 from app.tasks.router import router as tasks_router
+from app.timer.router import router as timer_router
 
 # Fail closed before the app object even exists — see AC19.
 settings.fail_closed_on_missing_secrets()
@@ -56,3 +57,4 @@ async def healthz() -> JSONResponse:
 app.include_router(auth_router)
 app.include_router(tasks_router)
 app.include_router(analytics_router)
+app.include_router(timer_router)

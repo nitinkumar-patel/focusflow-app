@@ -8,7 +8,7 @@
 # backend-for-frontend) calls it, over the Docker Compose internal network.
 # It is never reachable from the browser (see ADR-0001 § Network topology).
 openapi: "3.1.0"
-x-spec: [docs/specs/walking-skeleton/]
+x-spec: [docs/specs/walking-skeleton/, docs/specs/task-priority-focus-timer/]
 info:
   title: FocusFlow internal API
   version: "0.1.0"
@@ -57,31 +57,49 @@ components:
 
     Task:
       type: object
-      required: [id, title, created_at]
+      required: [id, title, priority, estimated_pomodoros, completed_pomodoros, created_at]
       properties:
         id: { type: string, format: uuid }
         title: { type: string, minLength: 1, maxLength: 200 }
+        priority: { type: string, enum: [high, medium, low] }
+        estimated_pomodoros: { type: integer, minimum: 1, maximum: 20 }
+        completed_pomodoros:
+          type: integer
+          minimum: 0
+          description: Count of the task's recorded work sessions.
         created_at: { type: string, format: date-time }
 
-    PomodoroSession:
+    Timer:
       type: object
       description: >
-        A single completed *work* interval run against a task. Break
-        intervals are client-side timer state only and are never persisted
-        — they are not focus time. The server rejects a session whose
-        duration_seconds doesn't match ended_at - started_at (±2s
-        tolerance) or that exceeds the configured work-interval length
-        (see plan.md § Behavior & rules).
-      required: [id, task_id, started_at, ended_at, duration_seconds]
+        The caller's single active timer. Sessions are recorded by the
+        server when a work phase's end time passes (settlement), never
+        posted by the client.
+      required:
+        - task_id
+        - phase
+        - started_at
+        - ends_at
+        - duration_seconds
+        - remaining_seconds
+        - server_time
+        - cycle_position
       properties:
-        id: { type: string, format: uuid }
         task_id: { type: string, format: uuid }
+        phase: { type: string, enum: [work, short_break, long_break] }
         started_at: { type: string, format: date-time }
-        ended_at: { type: string, format: date-time }
-        duration_seconds:
+        ends_at: { type: string, format: date-time }
+        duration_seconds: { type: integer, minimum: 1 }
+        remaining_seconds: { type: integer, minimum: 0 }
+        server_time:
+          type: string
+          format: date-time
+          description: Server clock at response time, for client skew correction.
+        cycle_position:
           type: integer
           minimum: 1
-          description: Wall-clock length of the completed work interval.
+          maximum: 4
+          description: The "n" of "Pomodoro n of 4".
 
     FocusTimeByDay:
       type: object
@@ -130,9 +148,7 @@ components:
     ValidationError:
       description: >
         Request body failed schema validation (e.g. password under 8
-        chars, empty/too-long task title, duration_seconds inconsistent
-        with started_at/ended_at or exceeding the max work-interval
-        length). apps/web's Server Actions re-validate before calling
+        chars, empty/too-long task title, estimated_pomodoros outside 1-20). apps/web's Server Actions re-validate before calling
         this API, so this response is reachable only via a non-standard
         client or a bypassed form. `detail` is always a plain string
         built from field name + message — apps/api installs a custom
@@ -236,7 +252,10 @@ paths:
         - $ref: "#/components/parameters/UserIdHeader"
       responses:
         "200":
-          description: Tasks belonging to the user, newest first.
+          description: >
+            Tasks belonging to the user, ordered by priority (high, medium,
+            low) then newest first. Settles the caller's elapsed timer phases
+            first so completed_pomodoros is never stale.
           content:
             application/json:
               schema:
@@ -257,6 +276,8 @@ paths:
               required: [title]
               properties:
                 title: { type: string, minLength: 1, maxLength: 200 }
+                priority: { type: string, enum: [high, medium, low], default: medium }
+                estimated_pomodoros: { type: integer, minimum: 1, maximum: 20, default: 1 }
       responses:
         "201":
           description: Task created.
@@ -266,44 +287,81 @@ paths:
         "422": { $ref: "#/components/responses/ValidationError" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
-  /tasks/{task_id}/sessions:
+  /timer/start:
     post:
-      summary: Record one completed Pomodoro work interval against a task.
+      summary: Start a work phase against one of the caller's tasks.
+      description: >
+        Settles elapsed phases first. 404 whether the task is missing or
+        belongs to another user; 409 if the caller already has a timer in
+        any phase.
       parameters:
         - $ref: "#/components/parameters/InternalSecretHeader"
         - $ref: "#/components/parameters/UserIdHeader"
-        - name: task_id
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [started_at, ended_at, duration_seconds]
+              required: [task_id]
               properties:
-                started_at: { type: string, format: date-time }
-                ended_at: { type: string, format: date-time }
-                duration_seconds: { type: integer, minimum: 1 }
+                task_id: { type: string, format: uuid }
       responses:
         "201":
-          description: Session recorded.
+          description: Timer started.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/PomodoroSession" }
+              schema: { $ref: "#/components/schemas/Timer" }
         "404":
           description: Task does not exist or does not belong to this user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: The caller already has an active timer.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "422": { $ref: "#/components/responses/ValidationError" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /timer:
+    get:
+      summary: Read the caller's active timer, settling elapsed phases first.
+      parameters:
+        - $ref: "#/components/parameters/InternalSecretHeader"
+        - $ref: "#/components/parameters/UserIdHeader"
+      responses:
+        "200":
+          description: The active timer, or JSON null when none is running.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/Timer"
+                  - type: "null"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /timer/stop:
+    post:
+      summary: Stop the caller's timer (any phase), settling elapsed phases first.
+      parameters:
+        - $ref: "#/components/parameters/InternalSecretHeader"
+        - $ref: "#/components/parameters/UserIdHeader"
+      responses:
+        "204":
+          description: Timer removed.
+        "404":
+          description: No active timer remains after settlement.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   /analytics/focus-time:
     get:
       summary: Aggregate focus time (sum of recorded work-interval sessions).
+      description: Settles the caller's elapsed timer phases first.
       parameters:
         - $ref: "#/components/parameters/InternalSecretHeader"
         - $ref: "#/components/parameters/UserIdHeader"

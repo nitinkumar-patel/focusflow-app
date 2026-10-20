@@ -46,7 +46,7 @@ spec's design-intent bar.
 - Write an Alembic migration in the same change as any model change to
   `users`, `tasks`, or `pomodoro_sessions`.
 - Honor a `POMODORO_TEST_SHORT_INTERVALS` environment override (read
-  server-side and passed as props into the timer UI — never exposed as a
+  by the api service, which resolves the interval lengths — never exposed as a
   `NEXT_PUBLIC_*` var, since the interval lengths are not meant to be
   visible/tunable from the browser) that shortens the AC5 interval
   lengths for manual QA. There is no separate non-production deployment
@@ -115,14 +115,13 @@ spec's design-intent bar.
   break):** TDD (AC5). It's a compressible invariant — given the interval
   kind that just completed and how many work intervals have completed so
   far, the next interval's **kind** is a pure function of that pair
-  (interval *lengths* are resolved separately, from a server-supplied
-  durations map — see the next bullet). Table tests in
-  `apps/web/lib/pomodoro-cycle.test.ts`.
+  (interval *lengths* are resolved separately — see the next bullet).
+  Since `docs/specs/task-priority-focus-timer/spec.md` the cadence is
+  settled server-side; its tests live in `apps/api/tests/test_timer.py`.
 - **Default and overridden interval lengths (25/5/15 minutes, and the
-  `POMODORO_TEST_SHORT_INTERVALS` override):** TDD (AC5) — a pure
-  `resolveDurations(overrideEnvValue)` helper, table-tested for the
-  default map and the override map, in
-  `apps/web/lib/pomodoro-durations.test.ts`.
+  `POMODORO_TEST_SHORT_INTERVALS` override):** TDD (AC5) — resolved by
+  the api's settings and covered in `apps/api/tests/test_config.py`;
+  see `docs/specs/task-priority-focus-timer/spec.md`.
 - **Password hashing and verification (Argon2id):** TDD — pure
   input/output contract (hash a password, verify a password against a
   hash, wrong password fails, algorithm identifier and per-password salt
@@ -162,12 +161,11 @@ spec's design-intent bar.
   "without a page reload" means at the protocol level; see
   `docs/specs/walking-skeleton/qa-log.md`'s verification-methodology
   caveat for what this can and can't prove versus an actual browser.
-- **Breaks are never recorded as sessions** (AC7): covered by T12's
-  component test (fake timers, mocked record-session action) asserting
-  zero calls across break transitions — not the FastAPI surface, since
-  the API has no way to distinguish a break-derived request from a
-  work-derived one; the rule is enforced entirely client-side by
-  construction (AC7's implementation has no `kind` field to check).
+- **Breaks are never recorded as sessions** (AC7): since
+  `docs/specs/task-priority-focus-timer/spec.md`, breaks live only in the
+  `active_timers` row and settlement inserts a session only when a work
+  phase ends; covered by the settlement tests in
+  `apps/api/tests/test_timer.py`.
 - **Unauthenticated visitor redirected to `/login`, and every mutating
   Server Action independently verifies the session** (AC12, AC16):
   visual / manual QA for the redirect (T9/T14); a goal-based grep for
@@ -249,18 +247,18 @@ spec's design-intent bar.
       finishes naturally, a 5-minute short-break countdown begins
       automatically, and the cycle continues, inserting a 15-minute long
       break after every 4th completed work interval (and every 4th
-      thereafter). These are the canonical interval lengths and cadence
-      for this spec: the plan's constants and test fixtures derive from
-      this criterion, which is the only place the numbers may be
-      changed — other sections restating them for implementation
-      purposes (a TypeScript constant, a test's expected value) are
-      instances of this criterion, not competing definitions of it.
+      thereafter). The canonical interval lengths and cadence, and
+      the server-side countdown that runs them, are now defined in
+      `docs/specs/task-priority-focus-timer/spec.md`; this criterion
+      defers to that spec for the values.
 - [x] AC6: Given a work interval that finishes naturally, FocusFlow
-      records exactly one completed session against that task (`POST
-      /tasks/{task_id}/sessions`); given a work interval the user stops
+      records exactly one completed session against that task, recorded
+      by the server when the work phase ends (see
+      `docs/specs/task-priority-focus-timer/spec.md`); given a work interval the user stops
       before it finishes, no session is recorded.
 - [x] AC7: Given a break interval (short or long) finishing naturally or
-      being stopped early, no session is ever recorded for it — sessions
+      being stopped early, no session is ever recorded for it (breaks
+      exist only in `active_timers`) — sessions
       represent completed work intervals only.
 - [x] AC8: Given a user with at least one recorded session, when they
       open the analytics view, they see a bar chart of focus minutes per

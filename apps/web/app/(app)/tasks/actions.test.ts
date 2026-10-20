@@ -21,10 +21,9 @@ vi.mock("next/cache", () => ({
 import { apiFetch } from "@/lib/api-client";
 import { auth } from "@/lib/auth";
 
-import { createTaskAction, recordSessionAction } from "./actions";
+import { createTaskAction } from "./actions";
 
 const SESSION = { user: { id: "11111111-1111-4111-8111-111111111111" } };
-const VALID_TASK_ID = "22222222-2222-4222-8222-222222222222";
 
 function formDataWithTitle(title: string): FormData {
   const fd = new FormData();
@@ -71,62 +70,60 @@ describe("createTaskAction", () => {
   });
 });
 
-describe("recordSessionAction", () => {
+function formDataWithFields(fields: Record<string, string>): FormData {
+  const fd = new FormData();
+  for (const [k, v] of Object.entries(fields)) fd.set(k, v);
+  return fd;
+}
+
+describe("createTaskAction priority and estimate", () => {
   beforeEach(() => {
     vi.mocked(auth).mockResolvedValue(SESSION as never);
     vi.mocked(apiFetch).mockReset();
   });
 
-  const now = new Date().toISOString();
-
-  it("rejects a non-UUID taskId without calling apiFetch", async () => {
-    const result = await recordSessionAction("not-a-uuid", now, now, 100);
-    expect(result.ok).toBe(false);
-    expect(apiFetch).not.toHaveBeenCalled();
-  });
-
-  it("rejects an unparseable startedAt without calling apiFetch", async () => {
-    const result = await recordSessionAction(VALID_TASK_ID, "not-a-date", now, 100);
-    expect(result.ok).toBe(false);
-    expect(apiFetch).not.toHaveBeenCalled();
-  });
-
-  it("rejects durationSeconds <= 0 without calling apiFetch", async () => {
-    const result = await recordSessionAction(VALID_TASK_ID, now, now, 0);
-    expect(result.ok).toBe(false);
-    expect(apiFetch).not.toHaveBeenCalled();
-  });
-
-  it("rejects durationSeconds above the 1500s AC5 ceiling without calling apiFetch", async () => {
-    const result = await recordSessionAction(VALID_TASK_ID, now, now, 1501);
-    expect(result.ok).toBe(false);
-    expect(apiFetch).not.toHaveBeenCalled();
-  });
-
-  it("rejects a non-integer durationSeconds without calling apiFetch", async () => {
-    const result = await recordSessionAction(VALID_TASK_ID, now, now, 100.5);
-    expect(result.ok).toBe(false);
-    expect(apiFetch).not.toHaveBeenCalled();
-  });
-
-  it("forwards valid input and the session's userId to apiFetch", async () => {
+  it("passes priority and estimated_pomodoros to the API", async () => {
     vi.mocked(apiFetch).mockResolvedValue({
       ok: true,
-      data: { id: "1", task_id: VALID_TASK_ID, started_at: now, ended_at: now, duration_seconds: 100 },
+      data: {
+        id: "1",
+        title: "T",
+        created_at: "now",
+        priority: "high",
+        estimated_pomodoros: 4,
+        completed_pomodoros: 0,
+      },
     });
-    const result = await recordSessionAction(VALID_TASK_ID, now, now, 100);
-    expect(result.ok).toBe(true);
-    expect(apiFetch).toHaveBeenCalledWith(`/tasks/${VALID_TASK_ID}/sessions`, {
+    const result = await createTaskAction(
+      {},
+      formDataWithFields({ title: "T", priority: "high", estimated_pomodoros: "4" }),
+    );
+    expect(result.error).toBeUndefined();
+    expect(apiFetch).toHaveBeenCalledWith("/tasks", {
       method: "POST",
       userId: SESSION.user.id,
-      body: { started_at: now, ended_at: now, duration_seconds: 100 },
+      body: { title: "T", priority: "high", estimated_pomodoros: 4 },
     });
   });
 
-  it("rejects without calling apiFetch when there's no session", async () => {
-    vi.mocked(auth).mockResolvedValue(null as never);
-    const result = await recordSessionAction(VALID_TASK_ID, now, now, 100);
-    expect(result.ok).toBe(false);
+  it.each(["0", "21", "-1", "1.5", "abc", "", "1e1", " "])(
+    "rejects estimate %j without calling apiFetch",
+    async (estimate) => {
+      const result = await createTaskAction(
+        {},
+        formDataWithFields({ title: "T", priority: "low", estimated_pomodoros: estimate }),
+      );
+      expect(result.error).toBeTruthy();
+      expect(apiFetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["urgent", "HIGH", ""])("rejects priority %j without calling apiFetch", async (priority) => {
+    const result = await createTaskAction(
+      {},
+      formDataWithFields({ title: "T", priority, estimated_pomodoros: "2" }),
+    );
+    expect(result.error).toBeTruthy();
     expect(apiFetch).not.toHaveBeenCalled();
   });
 });

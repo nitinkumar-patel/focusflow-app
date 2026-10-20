@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { ThemeProvider } from "@/components/ThemeProvider";
-import { ThemeToggle } from "@/components/ThemeToggle";
 import { THEME_STORAGE_KEY } from "@/lib/theme";
 import "./globals.css";
 
@@ -36,10 +35,6 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       </head>
       <body className="min-h-full flex flex-col bg-background text-foreground">
         <ThemeProvider>
-          <header className="flex flex-wrap items-center justify-between gap-2 bg-surface px-4 pt-3 pb-2 sm:px-6">
-            <span className="text-lg font-semibold tracking-tight">FocusFlow</span>
-            <ThemeToggle />
-          </header>
           {children}
         </ThemeProvider>
       </body>

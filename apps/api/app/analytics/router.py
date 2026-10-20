@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import require_internal_secret, require_user_id
 from app.db.session import get_db_session
 from app.models import PomodoroSession, Task
+from app.timer.settlement import settle_timer
 
 router = APIRouter(
     prefix="/analytics", tags=["analytics"], dependencies=[Depends(require_internal_secret)]
@@ -45,7 +46,12 @@ async def focus_time(
     user_id: uuid.UUID = Depends(require_user_id),
     db: AsyncSession = Depends(get_db_session),
 ) -> FocusTimeResponse:
-    today = datetime.now(UTC).date()
+    # Settle first so elapsed work phases are counted (AC11).
+    now = datetime.now(UTC)
+    await settle_timer(db, user_id, now)
+    await db.commit()
+
+    today = now.date()
     start_date = today - timedelta(days=days - 1)
     window_start = datetime.combine(start_date, time.min, tzinfo=UTC)
 
