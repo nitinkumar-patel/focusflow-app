@@ -54,3 +54,13 @@ open = [
   { slug = "walking-skeleton-auth-error-detail-log-leak", source = "spec/walking-skeleton security-reviewer Nit#4", summary = "apiFetch's logFailure logs apps/api's raw error detail verbatim; some email_validator rejection reasons on /auth/register can embed a fragment of the submitted address into docker compose logs web — needs a design call on the apps/api side (a custom validation-error handler for email fields), not a client-side truncation", needs = [], type = "spec" },
 ]
 closed = []
+
+["ini-001"]
+name = "FocusFlow web app"
+milestone = "Web UI redesign"
+status = "active"
+
+["ini-001".work]
+queue = [
+  { path = "docs/specs/web-ui-redesign/spec.md", kind = "spec", source = { mode = "repo-origin" }, summary = "Web UI redesign and light/dark theming", needs = [] },
+]

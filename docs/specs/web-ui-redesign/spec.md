@@ -1,6 +1,6 @@
 # Spec: Web UI redesign & theming
 
-- **Status:** Approved <!-- Draft | Approved | Implementing | Shipped | Archived -->
+- **Status:** Implementing <!-- Draft | Approved | Implementing | Shipped | Archived -->
 - **Owner:** project owner
 - **Plan:** [`plan.md`](plan.md)
 - **Constrained by:** ADR-0001 (tech stack), `docs/architecture/reference.md`

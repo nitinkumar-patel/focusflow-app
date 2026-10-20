@@ -20,6 +20,7 @@ docs/specs/<feature>/
 | Spec | Status | Constrained by | Notes |
 | --- | --- | --- | --- |
 | [`walking-skeleton`](walking-skeleton/spec.md) | Draft | ADR-0001 | First feature: signup/login, task + Pomodoro cycle, analytics, full stack end to end. |
+| [`web-ui-redesign`](web-ui-redesign/spec.md) | Implementing | ADR-0001 | Restyle and light/dark theming of all web screens. |
 
 ## Shipped specs (archived)
 

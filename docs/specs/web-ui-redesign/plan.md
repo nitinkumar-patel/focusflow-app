@@ -1,7 +1,7 @@
 # Plan: Web UI redesign & theming
 
 - **Spec:** [`spec.md`](spec.md)
-- **Status:** Approved <!-- Drafting | Approved | Executing | Done -->
+- **Status:** Executing <!-- Drafting | Approved | Executing | Done -->
 - **Repository anchors:** `docs/architecture/reference.md` § Building-block
   view (this plan adds `apps/web/lib/theme.ts` and the repo's first
   shared React Context provider as new reusable building blocks, both
@@ -946,3 +946,6 @@ ships as a normal `apps/web` image rebuild.
   stays inside `apps/web`" claim, contradicted by T9's `docs/`
   registrations and every task's qa-log entry — narrowed to "every
   *code* change."
+
+- 2026-10-19: spec approved by project owner
+- 2026-10-19: plan approved by project owner

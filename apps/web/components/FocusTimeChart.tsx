@@ -13,8 +13,8 @@ export function FocusTimeChart({ byDay }: { byDay: FocusTimeByDay[] }) {
 
   return (
     <svg
-      width={width}
-      height={CHART_HEIGHT + LABEL_HEIGHT}
+      viewBox={`0 0 ${width - BAR_GAP} ${CHART_HEIGHT + LABEL_HEIGHT}`}
+      className="h-auto w-full max-w-md"
       role="img"
       aria-label={`Focus minutes per day for the last ${byDay.length} days`}
     >
@@ -29,12 +29,12 @@ export function FocusTimeChart({ byDay }: { byDay: FocusTimeByDay[] }) {
             <title>
               {day.date}: {day.minutes} min
             </title>
-            <rect x={x} y={y} width={BAR_WIDTH} height={Math.max(barHeight, 1)} fill="currentColor" />
+            <rect x={x} y={y} width={BAR_WIDTH} height={Math.max(barHeight, 1)} rx={3} className="fill-primary" />
             <text
               x={x + BAR_WIDTH / 2}
               y={CHART_HEIGHT + 14}
               textAnchor="middle"
-              fontSize="10"
+              className="fill-muted-foreground text-[10px]"
             >
               {label}
             </text>

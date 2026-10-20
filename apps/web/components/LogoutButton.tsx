@@ -6,7 +6,12 @@ import { logoutAction } from "@/app/(app)/actions";
 export function LogoutButton() {
   return (
     <form action={logoutAction}>
-      <button type="submit">Log out</button>
+      <button
+        type="submit"
+        className="cursor-pointer rounded-md border border-border px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-background focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+      >
+        Log out
+      </button>
     </form>
   );
 }

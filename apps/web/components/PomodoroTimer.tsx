@@ -123,18 +123,33 @@ export function PomodoroTimer({ taskId, durationsSeconds }: PomodoroTimerProps) 
   }
 
   return (
-    <span>
+    <span
+      data-running={running}
+      className={`flex flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-3 font-mono text-2xl font-semibold tabular-nums sm:text-3xl ${
+        kind === "work"
+          ? "border-primary text-primary"
+          : "border-border bg-surface text-foreground"
+      }`}
+    >
       {LABELS[kind]}: {formatTime(remainingSeconds)}{" "}
       {running ? (
-        <button type="button" onClick={handleStop}>
+        <button
+          type="button"
+          onClick={handleStop}
+          className="rounded-md border border-border bg-background px-4 py-2 font-sans text-base font-medium text-foreground hover:bg-surface focus:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+        >
           Stop
         </button>
       ) : (
-        <button type="button" onClick={handleStart}>
+        <button
+          type="button"
+          onClick={handleStart}
+          className="rounded-md bg-primary px-4 py-2 font-sans text-base font-medium text-background hover:opacity-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+        >
           Start focus session
         </button>
       )}
-      {recordError ? <span role="alert"> {recordError}</span> : null}
+      {recordError ? <span role="alert" className="w-full font-sans text-sm font-normal text-danger"> {recordError}</span> : null}
     </span>
   );
 }

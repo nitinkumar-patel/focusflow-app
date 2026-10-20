@@ -14,13 +14,13 @@ export default async function TasksPage() {
   const durationsSeconds = resolveDurations(process.env.POMODORO_TEST_SHORT_INTERVALS);
 
   return (
-    <div>
-      <h1>Tasks</h1>
+    <div className="flex flex-col gap-6">
+      <h1 className="text-2xl font-semibold text-foreground">Tasks</h1>
       <TaskForm />
       {result.ok ? (
         <TaskList tasks={result.data} durationsSeconds={durationsSeconds} />
       ) : (
-        <p role="alert">{safeErrorMessage(result)}</p>
+        <p role="alert" className="text-sm text-danger">{safeErrorMessage(result)}</p>
       )}
     </div>
   );

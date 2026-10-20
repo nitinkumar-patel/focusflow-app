@@ -79,6 +79,15 @@
     `fetch` to FastAPI (base URL, internal secret header, error
     normalization). New server actions call through it rather than
     calling `fetch` ad hoc.
+  - `apps/web/lib/theme.ts` — `resolveInitialTheme`, `applyTheme`, and
+    `THEME_STORAGE_KEY`: the single source of truth for light/dark theme
+    resolution. The inline anti-flash script in `app/layout.tsx` is a
+    deliberate hand-duplicate of this logic and must change in lockstep
+    with it.
+  - `apps/web/components/ThemeProvider.tsx` — the repo's first React
+    Context provider; holds the current theme and exposes it to
+    descendants. `ThemeToggle` consumes it rather than touching storage
+    or the DOM directly.
 - **Composition rules.** Browser → Next.js (public) → FastAPI (internal
   network only) → PostgreSQL (internal network only). No component skips
   a layer. `packages/` is empty for now — `web` and `api` don't share
